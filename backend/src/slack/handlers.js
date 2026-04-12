@@ -12,7 +12,7 @@ import {
 import { getCachedSnapshot, setCachedSnapshot } from '../services/snapshotCache.js';
 import { generateSnapshot } from '../services/snapshot.js';
 import { encrypt } from '../services/encryption.js';
-import { sendMessageWithTools } from '../services/claude.js';
+import { sendMessageWithTools, isJiraValid } from '../services/claude.js';
 import {
   formatResponse,
   formatResponseSmart,
@@ -84,7 +84,7 @@ export async function handleMessage({ message, say, client, context }) {
   }
 
   if (lower.includes('connect jira') || lower.includes('חבר jira') || lower.includes('חיבור jira')) {
-    if (workspace.jira_access_token) {
+    if (isJiraValid(workspace)) {
       await say({ text: 'Jira is already connected ✅' });
       return;
     }
@@ -449,7 +449,7 @@ export async function handleAction({ action, ack, say, body, context, client }) 
 
   if (action.action_id === 'welcome_connect_jira') {
     const workspace = await getWorkspace(workspaceId);
-    if (workspace?.jira_access_token) {
+    if (isJiraValid(workspace)) {
       await say({ text: 'Jira is already connected ✅' });
       return;
     }

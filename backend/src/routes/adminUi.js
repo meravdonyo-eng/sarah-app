@@ -13,9 +13,6 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -263,10 +260,7 @@ router.post('/upload', requireAuth, upload.single('file'), async (req, res) => {
   let text = '';
 
   try {
-    if (ext === '.pdf') {
-      const data = await pdfParse(req.file.buffer);
-      text = data.text.trim();
-    } else if (ext === '.md' || ext === '.txt') {
+    if (ext === '.md' || ext === '.txt') {
       text = req.file.buffer.toString('utf8').trim();
     } else {
       return res.redirect('/admin/prompt?error=filetype');

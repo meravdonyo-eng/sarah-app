@@ -10,7 +10,8 @@
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "npm run dev --workspace=backend",
     "dev:frontend": "npm run dev --workspace=frontend",
-    "install:all": "npm install"
+    "install:all": "npm install",
+    "start": "node backend/src/index.js"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

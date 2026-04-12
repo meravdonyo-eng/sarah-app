@@ -103,7 +103,7 @@ export async function handleMessage({ message, say, client, context }) {
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,
-      blocks: formatResponseSmart(result.response),
+      blocks: await formatResponseSmart(result.response),
       text: result.response,
     });
 
@@ -346,7 +346,7 @@ export async function handleAction({ action, ack, say, body, context, client }) 
   console.log(`[ACTION] action_id=${action.action_id} userId=${userId} workspaceId=${workspaceId}`);
 
   if (action.action_id === 'read_more') {
-    const rest = popReadMore(action.value);
+    const rest = await popReadMore(action.value);
     if (!rest) {
       await say({ text: ':hourglass: This content has expired — please ask again.' });
       return;

@@ -1,19 +1,17 @@
 // Stores the "rest" of a structured response, awaiting a "Read more" button click.
-// Each entry expires after 24 hours.
+// Uses the database so content survives server restarts.
 
-const store = new Map();
-let counter = 0;
+import { dbStoreReadMore, dbPopReadMore } from '../services/db.js';
 
-export function storeReadMore(content) {
-  const id = String(++counter);
-  store.set(id, content);
-  setTimeout(() => store.delete(id), 24 * 60 * 60 * 1000);
+let counter = Math.floor(Math.random() * 100000);
+
+export async function storeReadMore(content) {
+  const id = String(++counter) + '_' + Date.now();
+  await dbStoreReadMore(id, content);
   return id;
 }
 
 // Consume once — after retrieval the entry is removed
-export function popReadMore(id) {
-  const content = store.get(id) ?? null;
-  if (content !== null) store.delete(id);
-  return content;
+export async function popReadMore(id) {
+  return await dbPopReadMore(id);
 }

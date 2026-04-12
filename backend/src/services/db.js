@@ -52,6 +52,12 @@ export async function initDb() {
       flag_name     TEXT NOT NULL,
       PRIMARY KEY (workspace_id, slack_user_id, flag_name)
     );
+
+    CREATE TABLE IF NOT EXISTS read_more_store (
+      id         TEXT PRIMARY KEY,
+      content    TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL
+    );
   `);
 
   console.log('DB initialized');
@@ -189,6 +195,25 @@ export async function setUserFlag(workspaceId, slackUserId, flagName) {
      ON CONFLICT DO NOTHING`,
     [workspaceId, slackUserId, flagName]
   );
+}
+
+// Read more store — persists across server restarts
+export async function dbStoreReadMore(id, content) {
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  await pool.query(
+    `INSERT INTO read_more_store (id, content, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, expires_at = EXCLUDED.expires_at`,
+    [id, content, expiresAt]
+  );
+}
+
+export async function dbPopReadMore(id) {
+  const { rows } = await pool.query(
+    `DELETE FROM read_more_store WHERE id = $1 AND expires_at > NOW() RETURNING content`,
+    [id]
+  );
+  return rows[0]?.content ?? null;
 }
 
 export default pool;

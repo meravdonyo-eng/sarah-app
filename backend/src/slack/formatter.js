@@ -265,11 +265,11 @@ function splitAtReadMore(text) {
  * Smart formatter: if the response has a Bottom Line section,
  * shows it with a "Read more ▼" button. Otherwise shows the full response.
  */
-export function formatResponseSmart(text) {
+export async function formatResponseSmart(text) {
   const split = splitAtReadMore(text);
   if (!split) return formatResponse(text);
 
-  const id = storeReadMore(split.rest);
+  const id = await storeReadMore(split.rest);
 
   const blocks = chunkText(formatForSlack(split.summary)).map(chunk => ({
     type: 'section',

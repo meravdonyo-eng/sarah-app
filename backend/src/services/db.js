@@ -200,20 +200,25 @@ export async function setUserFlag(workspaceId, slackUserId, flagName) {
 // Read more store — persists across server restarts
 export async function dbStoreReadMore(id, content) {
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  console.log(`[ReadMore] Storing id=${id} contentLen=${content.length} expiresAt=${expiresAt.toISOString()}`);
   await pool.query(
     `INSERT INTO read_more_store (id, content, expires_at)
      VALUES ($1, $2, $3)
      ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, expires_at = EXCLUDED.expires_at`,
     [id, content, expiresAt]
   );
+  console.log(`[ReadMore] Stored OK id=${id}`);
 }
 
 export async function dbPopReadMore(id) {
+  console.log(`[ReadMore] Popping id=${id}`);
   const { rows } = await pool.query(
     `DELETE FROM read_more_store WHERE id = $1 AND expires_at > NOW() RETURNING content`,
     [id]
   );
-  return rows[0]?.content ?? null;
+  const found = rows[0]?.content ?? null;
+  console.log(`[ReadMore] Pop result for id=${id}: ${found ? `found (len=${found.length})` : 'NOT FOUND'}`);
+  return found;
 }
 
 export default pool;

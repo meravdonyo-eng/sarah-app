@@ -86,4 +86,33 @@ router.get('/stats', async (req, res) => {
   }
 });
 
+// GET /api/admin/readmore-debug — inspect read_more_store table
+router.get('/readmore-debug', async (req, res) => {
+  try {
+    // Check if table exists
+    const { rows: tableCheck } = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'read_more_store'
+      ) AS table_exists
+    `);
+
+    const tableExists = tableCheck[0]?.table_exists;
+    if (!tableExists) {
+      return res.json({ table_exists: false, rows: [] });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT id, length(content) AS content_length, expires_at,
+             expires_at > NOW() AS is_valid
+      FROM read_more_store
+      ORDER BY expires_at DESC
+      LIMIT 10
+    `);
+    res.json({ table_exists: true, rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

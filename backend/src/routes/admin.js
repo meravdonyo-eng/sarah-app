@@ -1,0 +1,89 @@
+/**
+ * Admin API — protected by ADMIN_TOKEN header
+ * Used by the frontend admin panel
+ */
+import express from 'express';
+import pool from '../services/db.js';
+
+const router = express.Router();
+
+function requireAdmin(req, res, next) {
+  const expected = process.env.ADMIN_TOKEN;
+  if (!expected) return res.status(503).json({ error: 'ADMIN_TOKEN not configured' });
+  if (req.get('x-admin-token') !== expected) return res.status(401).json({ error: 'Unauthorized' });
+  next();
+}
+
+router.use(requireAdmin);
+
+// GET /api/admin/workspaces — list all installed workspaces
+router.get('/workspaces', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        workspace_id,
+        team_name,
+        created_at,
+        updated_at,
+        (mixpanel_project_id IS NOT NULL) AS has_mixpanel,
+        (jira_access_token IS NOT NULL)   AS has_jira,
+        system_prompt
+      FROM workspaces
+      ORDER BY created_at DESC
+    `);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/workspaces/:id — single workspace detail
+router.get('/workspaces/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT workspace_id, team_name, created_at, updated_at,
+              (mixpanel_project_id IS NOT NULL) AS has_mixpanel,
+              (jira_access_token IS NOT NULL) AS has_jira,
+              system_prompt
+       FROM workspaces WHERE workspace_id = $1`,
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/workspaces/:id/prompt — update system prompt
+router.post('/workspaces/:id/prompt', async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    if (typeof prompt !== 'string') return res.status(400).json({ error: 'prompt must be a string' });
+    await pool.query(
+      'UPDATE workspaces SET system_prompt = $2, updated_at = NOW() WHERE workspace_id = $1',
+      [req.params.id, prompt.trim() || null]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/stats — quick stats
+router.get('/stats', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        COUNT(*)                                          AS total_workspaces,
+        COUNT(*) FILTER (WHERE mixpanel_project_id IS NOT NULL) AS with_mixpanel,
+        COUNT(*) FILTER (WHERE jira_access_token IS NOT NULL)   AS with_jira
+      FROM workspaces
+    `);
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;

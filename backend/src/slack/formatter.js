@@ -36,9 +36,25 @@ function chunkText(text, maxLen = 3000) {
   return chunks;
 }
 
+/**
+ * Strips emojis and the "Bottom Line:" label from Claude's analytical responses.
+ * Applied AFTER splitAtReadMore (which needs the raw text to find split points).
+ */
+function cleanResponseText(text) {
+  return text
+    // Remove "Bottom Line:" label with optional leading emoji and bold markers
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\uFE0F?\s*\*{0,2}Bottom Line:\*{0,2}\s*/gimu, '')
+    .replace(/\*{0,2}Bottom Line:\*{0,2}\s*/gim, '')
+    // Remove leading emojis from any line (emoji + optional variation selector + space)
+    .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\uFE0F?\s*/gmu, '')
+    // Clean up extra blank lines left behind
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function formatResponse(text) {
   const blocks = [];
-  const chunks = chunkText(formatForSlack(text));
+  const chunks = chunkText(formatForSlack(cleanResponseText(text)));
 
   for (const chunk of chunks) {
     blocks.push({
@@ -269,9 +285,13 @@ export async function formatResponseSmart(text) {
   const split = splitAtReadMore(text);
   if (!split) return formatResponse(text);
 
-  const id = await storeReadMore(split.rest);
+  // Clean AFTER splitting so splitAtReadMore can still find emoji/Bottom Line markers
+  const cleanedSummary = cleanResponseText(split.summary);
+  const cleanedRest = cleanResponseText(split.rest);
 
-  const blocks = chunkText(formatForSlack(split.summary)).map(chunk => ({
+  const id = await storeReadMore(cleanedRest);
+
+  const blocks = chunkText(formatForSlack(cleanedSummary)).map(chunk => ({
     type: 'section',
     text: { type: 'mrkdwn', text: chunk },
   }));

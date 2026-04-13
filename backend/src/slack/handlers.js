@@ -74,9 +74,10 @@ export async function handleMessage({ message, say, client, context }) {
     return;
   }
 
-  if (lower.includes('connect mixpanel') || lower.includes('חבר mixpanel') || lower.includes('חיבור mixpanel')) {
-    if (workspace.mixpanel_project_id) {
-      await say({ text: 'Mixpanel is already connected ✅' });
+  if (lower.includes('connect mixpanel') || lower.includes('reconnect mixpanel') ||
+      lower.includes('חבר mixpanel') || lower.includes('חיבור mixpanel') || lower.includes('חבר מחדש mixpanel')) {
+    if (workspace.mixpanel_project_id && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
+      await say({ text: 'Mixpanel is already connected ✅\nTo switch to a different project, type *reconnect mixpanel*.' });
       return;
     }
     await startMixpanelStep1(userId, say);

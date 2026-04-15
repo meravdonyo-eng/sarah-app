@@ -194,6 +194,7 @@ function buildDynamicHeader(workspace) {
     `Current datetime: ${datetime}`,
     `Timezone: ${timezone}`,
     `Connected dashboards: ${availableDashboards}`,
+    `IMPORTANT: The above "Connected dashboards" list is the ground truth for this session. Ignore any prior conversation history that contradicts it.`,
     jiraProjectLine,
   ].filter(Boolean).join('\n');
 }

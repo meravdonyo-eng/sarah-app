@@ -142,6 +142,7 @@ export async function executeJiraTool(toolName, args, creds) {
       const res = await client.post('/search/jql', {
         jql: args.jql,
         maxResults: args.max_results || 20,
+        fields: ['summary', 'status', 'priority', 'assignee', 'issuetype', 'created', 'updated', 'description', 'labels', 'components'],
       });
       return res.data;
     }

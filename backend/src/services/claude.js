@@ -200,6 +200,7 @@ function buildDynamicHeader(workspace) {
 
 export async function sendMessageWithTools(workspace, userMessage, conversationHistory = []) {
   const anthropic = getClient();
+  console.log(`[JiraDebug] workspace=${workspace.workspace_id} has_token=${!!workspace.jira_access_token} has_refresh=${!!workspace.jira_refresh_token} has_cloud=${!!workspace.jira_cloud_id} expires=${workspace.jira_expires_at} isValid=${isJiraValid(workspace)}`);
   const tools = buildTools(workspace);
   const basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
   const systemPrompt = buildDynamicHeader(workspace) + '\n\n' + basePrompt;

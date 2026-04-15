@@ -200,10 +200,19 @@ function buildDynamicHeader(workspace) {
 
 export async function sendMessageWithTools(workspace, userMessage, conversationHistory = []) {
   const anthropic = getClient();
-  console.log(`[JiraDebug] workspace=${workspace.workspace_id} has_token=${!!workspace.jira_access_token} has_refresh=${!!workspace.jira_refresh_token} has_cloud=${!!workspace.jira_cloud_id} expires=${workspace.jira_expires_at} isValid=${isJiraValid(workspace)}`);
   const tools = buildTools(workspace);
-  const basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
-  const systemPrompt = buildDynamicHeader(workspace) + '\n\n' + basePrompt;
+  const dynamicHeader = buildDynamicHeader(workspace);
+
+  let basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
+  // Substitute any {{AVAILABLE_DASHBOARDS}} placeholder left in static prompt files
+  if (basePrompt.includes('{{AVAILABLE_DASHBOARDS}}')) {
+    const dashboards = [];
+    if (workspace.mixpanel_project_id) dashboards.push('Mixpanel');
+    if (isJiraValid(workspace)) dashboards.push('Jira');
+    basePrompt = basePrompt.replace('{{AVAILABLE_DASHBOARDS}}', dashboards.join(', ') || 'None connected yet');
+  }
+
+  const systemPrompt = dynamicHeader + '\n\n' + basePrompt;
 
   const messages = [
     ...sanitizeHistory(conversationHistory),

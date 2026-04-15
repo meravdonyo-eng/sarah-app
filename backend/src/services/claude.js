@@ -12,9 +12,10 @@ const GLOBAL_PROMPT_PATH = path.join(__dirname, '../../prompts/system_prompt.txt
 
 function readGlobalPrompt() {
   try {
-    const content = fs.readFileSync(GLOBAL_PROMPT_PATH, 'utf8').trim();
-    // If file is empty or just a comment, return null
-    if (!content || content.startsWith('#')) return null;
+    const raw = fs.readFileSync(GLOBAL_PROMPT_PATH, 'utf8');
+    // Strip comment lines (starting with #) and trim
+    const content = raw.split('\n').filter(l => !l.trim().startsWith('#')).join('\n').trim();
+    if (!content) return null;
     return content;
   } catch {
     return null;

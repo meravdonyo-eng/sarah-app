@@ -204,12 +204,19 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   const dynamicHeader = buildDynamicHeader(workspace);
 
   let basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
-  // Substitute any {{AVAILABLE_DASHBOARDS}} placeholder left in static prompt files
-  if (basePrompt.includes('{{AVAILABLE_DASHBOARDS}}')) {
+  // Substitute all template placeholders in static prompt files
+  if (basePrompt.includes('{{')) {
+    const now = new Date();
+    const datetime = now.toISOString().replace('T', ' ').substring(0, 19);
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const dashboards = [];
     if (workspace.mixpanel_project_id) dashboards.push('Mixpanel');
     if (isJiraValid(workspace)) dashboards.push('Jira');
-    basePrompt = basePrompt.replace('{{AVAILABLE_DASHBOARDS}}', dashboards.join(', ') || 'None connected yet');
+    const availableStr = dashboards.join(', ') || 'None connected yet';
+    basePrompt = basePrompt
+      .replaceAll('{{CURRENT_DATETIME}}', datetime)
+      .replaceAll('{{TIMEZONE}}', timezone)
+      .replaceAll('{{AVAILABLE_DASHBOARDS}}', availableStr);
   }
 
   const systemPrompt = dynamicHeader + '\n\n' + basePrompt;

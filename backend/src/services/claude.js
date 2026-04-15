@@ -34,22 +34,9 @@ function buildSystemPrompt(workspace) {
   const datetime = now.toISOString().replace('T', ' ').substring(0, 19);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-  const dashboards = [];
-  if (workspace.mixpanel_project_id) dashboards.push('Mixpanel (Funnel, Retention, Engagement, User Journey, Errors, Segments)');
-  if (isJiraValid(workspace)) dashboards.push('Jira (Issues, Projects, Bugs)');
-  const availableDashboards = dashboards.length > 0 ? dashboards.join(', ') : 'None connected yet';
-
-  const jiraProjectLine = workspace.jira_default_project
-    ? `Default Jira project: ${workspace.jira_default_project} — always add "project = \\"${workspace.jira_default_project}\\"" to all JQL queries unless the user explicitly asks for a different project.`
-    : '';
-
   return `Sarah — Product Intelligence Partner · V3.7.2-PRODUCTION
 Slack Version · Token-Optimized · Progressive Disclosure
 
-Current datetime: ${datetime}
-Timezone: ${timezone}
-Connected dashboards: ${availableDashboards}
-${jiraProjectLine ? jiraProjectLine + '\n' : ''}
 S1: PERSONA
 You are Sarah, Product Intelligence Partner for PMs at growth-stage companies (10K+ users).
 Role: Senior PM/Data Analyst. Not strategist, storyteller, or dashboard.
@@ -187,10 +174,33 @@ function sanitizeHistory(history) {
   return history.slice(start);
 }
 
+function buildDynamicHeader(workspace) {
+  const now = new Date();
+  const datetime = now.toISOString().replace('T', ' ').substring(0, 19);
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  const dashboards = [];
+  if (workspace.mixpanel_project_id) dashboards.push('Mixpanel (Funnel, Retention, Engagement, User Journey, Errors, Segments)');
+  if (isJiraValid(workspace)) dashboards.push('Jira (Issues, Projects, Bugs)');
+  const availableDashboards = dashboards.length > 0 ? dashboards.join(', ') : 'None connected yet';
+
+  const jiraProjectLine = workspace.jira_default_project
+    ? `Default Jira project: ${workspace.jira_default_project} — always add "project = \\"${workspace.jira_default_project}\\"" to all JQL queries unless the user explicitly asks for a different project.`
+    : '';
+
+  return [
+    `Current datetime: ${datetime}`,
+    `Timezone: ${timezone}`,
+    `Connected dashboards: ${availableDashboards}`,
+    jiraProjectLine,
+  ].filter(Boolean).join('\n');
+}
+
 export async function sendMessageWithTools(workspace, userMessage, conversationHistory = []) {
   const anthropic = getClient();
   const tools = buildTools(workspace);
-  const systemPrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
+  const basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
+  const systemPrompt = buildDynamicHeader(workspace) + '\n\n' + basePrompt;
 
   const messages = [
     ...sanitizeHistory(conversationHistory),

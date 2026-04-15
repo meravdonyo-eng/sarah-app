@@ -221,7 +221,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   }
 
   const systemPrompt = dynamicHeader + '\n\n' + basePrompt;
-  console.log('[PromptDebug] First 300 chars of system prompt:', systemPrompt.slice(0, 300));
+  console.log('[PromptDebug]', systemPrompt.slice(0, 400).replace(/\n/g, ' | '));
 
   const messages = [
     ...sanitizeHistory(conversationHistory),

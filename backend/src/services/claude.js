@@ -221,7 +221,10 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   }
 
   const systemPrompt = dynamicHeader + '\n\n' + basePrompt;
-  console.log('[PromptDebug]', systemPrompt.slice(0, 400).replace(/\n/g, ' | '));
+  const dashIdx = systemPrompt.indexOf('Connected dashboards');
+  const gcIdx = systemPrompt.indexOf('GC: Dashboard');
+  console.log('[PromptDebug-header]', systemPrompt.slice(0, 300).replace(/\n/g, ' | '));
+  if (gcIdx !== -1) console.log('[PromptDebug-GC]', systemPrompt.slice(gcIdx, gcIdx + 300).replace(/\n/g, ' | '));
 
   const messages = [
     ...sanitizeHistory(conversationHistory),

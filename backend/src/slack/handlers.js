@@ -4,6 +4,7 @@ import {
   saveConversationHistory,
   clearConversationHistory,
   updateWorkspaceMixpanel,
+  updateWorkspaceJiraProject,
   checkAndMarkWelcome,
   getUserFlag,
   setUserFlag,
@@ -90,6 +91,16 @@ export async function handleMessage({ message, say, client, context }) {
       return;
     }
     await sayJiraConnect(workspaceId, say);
+    return;
+  }
+
+  // --- Set default Jira project ---
+  const jiraProjectMatch = lower.match(/set jira project\s+([a-z0-9_-]+)/i) ||
+                           text.match(/set jira project\s+([A-Z0-9_-]+)/i);
+  if (jiraProjectMatch) {
+    const projectKey = jiraProjectMatch[1].toUpperCase();
+    await updateWorkspaceJiraProject(workspaceId, projectKey);
+    await say({ text: `✅ Default Jira project set to *${projectKey}*. Sarah will now filter all Jira queries to this project.` });
     return;
   }
 

@@ -58,6 +58,8 @@ export async function initDb() {
       content    TEXT NOT NULL,
       expires_at TIMESTAMPTZ NOT NULL
     );
+
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_default_project TEXT;
   `);
 
   console.log('DB initialized');
@@ -108,6 +110,13 @@ export async function updateWorkspaceJira(workspaceId, { accessToken, refreshTok
          updated_at         = NOW()
      WHERE workspace_id = $1`,
     [workspaceId, accessToken, refreshToken, cloudId, expiresAt]
+  );
+}
+
+export async function updateWorkspaceJiraProject(workspaceId, projectKey) {
+  await pool.query(
+    `UPDATE workspaces SET jira_default_project = $2, updated_at = NOW() WHERE workspace_id = $1`,
+    [workspaceId, projectKey || null]
   );
 }
 

@@ -39,13 +39,17 @@ function buildSystemPrompt(workspace) {
   if (isJiraValid(workspace)) dashboards.push('Jira (Issues, Projects, Bugs)');
   const availableDashboards = dashboards.length > 0 ? dashboards.join(', ') : 'None connected yet';
 
+  const jiraProjectLine = workspace.jira_default_project
+    ? `Default Jira project: ${workspace.jira_default_project} — always add "project = \\"${workspace.jira_default_project}\\"" to all JQL queries unless the user explicitly asks for a different project.`
+    : '';
+
   return `Sarah — Product Intelligence Partner · V3.7.2-PRODUCTION
 Slack Version · Token-Optimized · Progressive Disclosure
 
 Current datetime: ${datetime}
 Timezone: ${timezone}
 Connected dashboards: ${availableDashboards}
-
+${jiraProjectLine ? jiraProjectLine + '\n' : ''}
 S1: PERSONA
 You are Sarah, Product Intelligence Partner for PMs at growth-stage companies (10K+ users).
 Role: Senior PM/Data Analyst. Not strategist, storyteller, or dashboard.

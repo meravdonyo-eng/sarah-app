@@ -42,12 +42,16 @@ function chunkText(text, maxLen = 3000) {
  */
 function cleanResponseText(text) {
   return text
-    // Remove "Bottom Line:" label with optional leading emoji and bold markers
-    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\uFE0F?\s*\*{0,2}Bottom Line:\*{0,2}\s*/gimu, '')
-    .replace(/\*{0,2}Bottom Line:\*{0,2}\s*/gim, '')
-    // Remove leading emojis from any line (emoji + optional variation selector + space)
-    .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\uFE0F?\s*/gmu, '')
-    // Clean up extra blank lines left behind
+    // Remove "Bottom Line:" label completely (with or without 🎯 emoji + bold markers)
+    .replace(/🎯\s*\*{0,2}Bottom Line:\*{0,2}\s*/gi, '')
+    .replace(/\*{0,2}Bottom Line:\*{0,2}\s*/gi, '')
+    // Remove emojis before section headers — keep the header text
+    .replace(/^📊\s*(\*{0,2}Key Data)/gm, '$1')
+    .replace(/^💡\s*(\*{0,2}(?:Key Signal|Recommended Action))/gm, '$1')
+    .replace(/^🔍\s*(\*{0,2}(?:Root Cause|\[Show Deep Dive\]))/gm, '$1')
+    .replace(/^❓\s*(\*{0,2}What I Don)/gm, '$1')
+    .replace(/^➡️\s*(\*{0,2}Next Step)/gm, '$1')
+    // Clean up any double blank lines left behind
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }

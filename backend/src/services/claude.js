@@ -177,6 +177,41 @@ function sanitizeHistory(history) {
   return history.slice(start);
 }
 
+// --- Jira Mandate ---
+const JIRA_KEYWORDS = ['bug', 'error', 'crash', 'support', 'ticket', 'fix', 'load', 'timeout', 'failure', 'incident', 'broken', 'issue', 'outage', 'down', 'slow'];
+
+function detectJiraMandate(question) {
+  const lower = question.toLowerCase();
+  return JIRA_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+// --- Baseline Query (extended date range) ---
+const BASELINE_KEYWORDS = ['after fix', 'after the fix', 'after fixing', 'before and after', 'did it improve', 'did it help', 'impact of', 'effect of', 'since the fix', 'since we fixed', 'since deploying', 'post fix', 'post-fix', 'post deploy', 'after deploy', 'decrease in errors', 'increase in completion'];
+
+function detectBaselineQuery(question) {
+  const lower = question.toLowerCase();
+  return BASELINE_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+function buildMessageAddons(userMessage) {
+  const addons = [];
+
+  if (detectJiraMandate(userMessage)) {
+    addons.push('JIRA MANDATE ACTIVE: This question contains bug/error/support keywords. Pull Jira FIRST before any Mixpanel analysis. Jira = primary source. Mixpanel = validation only.');
+  }
+
+  if (detectBaselineQuery(userMessage)) {
+    const toDate = new Date();
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 56);
+    const from = fromDate.toISOString().split('T')[0];
+    const to = toDate.toISOString().split('T')[0];
+    addons.push(`BASELINE MODE ACTIVE: Pull 8+ weeks of data (${from} to ${to}). Calculate avg, min, max, and weekly variance for key metrics before drawing any before/after conclusions. If fix not yet deployed — build baseline anyway and state measurement targets.`);
+  }
+
+  return addons.length > 0 ? '\n\n' + addons.join('\n\n') : '';
+}
+
 function buildDynamicHeader(workspace) {
   const now = new Date();
   const datetime = now.toISOString().replace('T', ' ').substring(0, 19);
@@ -221,11 +256,8 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
       .replaceAll('{{AVAILABLE_DASHBOARDS}}', availableStr);
   }
 
-  const systemPrompt = dynamicHeader + '\n\n' + basePrompt;
-  const dashIdx = systemPrompt.indexOf('Connected dashboards');
-  const gcIdx = systemPrompt.indexOf('GC: Dashboard');
-  console.log('[PromptDebug-header]', systemPrompt.slice(0, 300).replace(/\n/g, ' | '));
-  if (gcIdx !== -1) console.log('[PromptDebug-GC]', systemPrompt.slice(gcIdx, gcIdx + 300).replace(/\n/g, ' | '));
+  const messageAddons = buildMessageAddons(userMessage);
+  const systemPrompt = dynamicHeader + '\n\n' + basePrompt + messageAddons;
 
   const messages = [
     ...sanitizeHistory(conversationHistory),

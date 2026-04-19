@@ -58,14 +58,17 @@ function cleanResponseText(text) {
 
 export function formatResponse(text) {
   const blocks = [];
-  const chunks = chunkText(formatForSlack(cleanResponseText(text)));
+  const cleaned = cleanResponseText(text);
+  const rtl = isRTL(cleaned);
+  const chunks = chunkText(formatForSlack(cleaned));
 
   for (const chunk of chunks) {
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: chunk,
+        // Prepend RLM (U+200F) so Slack renders the block right-to-left
+        text: rtl ? '\u200F' + chunk : chunk,
       },
     });
   }
@@ -294,10 +297,11 @@ export async function formatResponseSmart(text) {
   const cleanedRest = cleanResponseText(split.rest);
 
   const id = await storeReadMore(cleanedRest);
+  const rtl = isRTL(cleanedSummary);
 
   const blocks = chunkText(formatForSlack(cleanedSummary)).map(chunk => ({
     type: 'section',
-    text: { type: 'mrkdwn', text: chunk },
+    text: { type: 'mrkdwn', text: rtl ? '\u200F' + chunk : chunk },
   }));
 
   blocks.push({

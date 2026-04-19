@@ -276,6 +276,8 @@ function buildDynamicHeader(workspace) {
     `Connected dashboards: ${availableDashboards}`,
     `IMPORTANT: The above "Connected dashboards" list is the ground truth for this session. Ignore any prior conversation history that contradicts it.`,
     jiraProjectLine,
+    `DATA FRESHNESS RULE: NEVER say "I already answered this" and repeat a prior number. For ANY question about metrics, counts, or conversions — always make a fresh tool call. Numbers in conversation history may be wrong. If asked to recheck, call the tool again (do NOT re-add daily numbers already mentioned in history).`,
+    `FUNNEL RULE: For step-to-step conversion questions (how many users went from X to Y), ALWAYS use mixpanel_funnel — never count by adding segmentation values. Segmentation and funnel give different numbers because of the conversion window. The funnel number matches the Mixpanel dashboard exactly.`,
   ].filter(Boolean).join('\n');
 }
 

@@ -406,7 +406,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
       const eventsStr = JSON.stringify(events).slice(0, 3000);
       // Format funnels as a readable list so Claude can reliably extract funnel_id and conversion_window
       const funnelList = Array.isArray(funnels)
-        ? funnels.map(f => `  - id=${f.id} name="${f.name}" conversion_window=${f.conversion_window ?? f.conversion_window_seconds ?? 'unknown'} steps=${JSON.stringify(f.steps?.map(s => s.event) ?? [])}`)
+        ? funnels.map(f => `  - funnel_id=${f.funnel_id ?? f.id} name="${f.name}"`)
             .join('\n')
         : JSON.stringify(funnels).slice(0, 1500);
 

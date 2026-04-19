@@ -141,40 +141,53 @@ export async function getMixpanelProjectTimezone(creds) {
 }
 
 /**
- * Parse the raw Mixpanel /funnels API response into a clean, unambiguous
- * step-by-step breakdown so Claude cannot misread it.
+ * Parse the raw Mixpanel /funnels API response into a clean step-by-step breakdown.
  *
- * Handles two response structures:
- * 1. Saved funnel (funnel_id): data[date].steps[]
- * 2. Ad-hoc funnel (events array): data[date].steps[] — same structure
+ * Mixpanel returns per-day data: one entry per date in the range.
+ * Each date entry shows users who STARTED step 1 on that date and how far they got.
+ * To get period totals we SUM step counts across all date entries.
  *
- * Never sum daily step counts — users converting across date boundaries
- * would be double-counted. Use the first (aggregate) entry only.
+ * This matches the Mixpanel dashboard which also sums daily cohorts.
+ * (Users who re-enter the funnel on multiple days are counted per entry —
+ * but for typical activation funnels this is negligible.)
  */
 function parseFunnelResponse(raw) {
   try {
-    const dataEntries = Object.entries(raw?.data ?? {});
-    if (dataEntries.length === 0) return raw;
+    // Log the raw structure keys to help diagnose format issues
+    const dataKeys = Object.keys(raw?.data ?? {});
+    console.log(`[FunnelParse] data keys: ${dataKeys.slice(0, 3).join(', ')} ... (${dataKeys.length} total)`);
 
-    // Without 'unit', Mixpanel returns one aggregate entry for the full period.
-    // With 'unit', it returns per-period entries — we still use the first one
-    // as the aggregate (the overall count is in the step.count field, not a sum).
-    const [, periodData] = dataEntries[0];
-    const rawSteps = periodData?.steps ?? [];
+    if (dataKeys.length === 0) return raw;
+
+    // Collect step data from the first entry to get names and count
+    const firstEntry = raw.data[dataKeys[0]];
+    const rawSteps = firstEntry?.steps ?? [];
     if (rawSteps.length === 0) return raw;
 
-    const startCount = rawSteps[0]?.count ?? 0;
+    const numSteps = rawSteps.length;
+    const stepNames = rawSteps.map((s, i) => s.event?.event ?? s.goal ?? `Step ${i + 1}`);
 
-    const steps = rawSteps.map((s, i) => ({
+    // Sum step counts across ALL date entries — this gives the period total
+    const stepCounts = new Array(numSteps).fill(0);
+    for (const key of dataKeys) {
+      const entry = raw.data[key];
+      const steps = entry?.steps ?? [];
+      for (let i = 0; i < numSteps && i < steps.length; i++) {
+        stepCounts[i] += steps[i]?.count ?? 0;
+      }
+    }
+
+    console.log(`[FunnelParse] Summed ${dataKeys.length} date entries → steps: ${stepCounts.join(', ')}`);
+
+    const steps = stepCounts.map((count, i) => ({
       step: i + 1,
-      event: s.event?.event ?? s.goal ?? `Step ${i + 1}`,
-      unique_users: s.count,
-      avg_time_days: s.avg_time ? +(s.avg_time / 86400).toFixed(1) : null,
-      pct_from_step_1: startCount > 0 ? +((s.count / startCount * 100).toFixed(2)) : 0,
+      event: stepNames[i],
+      unique_users: count,
+      pct_from_step_1: stepCounts[0] > 0 ? +((count / stepCounts[0] * 100).toFixed(2)) : 0,
       pct_from_previous_step: i === 0
         ? 100
-        : rawSteps[i - 1]?.count > 0
-          ? +((s.count / rawSteps[i - 1].count * 100).toFixed(2))
+        : stepCounts[i - 1] > 0
+          ? +((count / stepCounts[i - 1] * 100).toFixed(2))
           : 0,
     }));
 

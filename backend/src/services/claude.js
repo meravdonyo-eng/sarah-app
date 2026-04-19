@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { MIXPANEL_TOOLS, executeMixpanelTool } from './mixpanel.js';
+import { MIXPANEL_TOOLS, executeMixpanelTool, getMixpanelProjectTimezone } from './mixpanel.js';
 import { JIRA_TOOLS, executeJiraTool } from './jira.js';
 import { decrypt } from './encryption.js';
 import fs from 'fs';
@@ -310,13 +310,41 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   const hasMixpanel = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
   if (hasMixpanel) {
     try {
-      const [events, funnels] = await Promise.all([
+      const creds = {
+        projectId: decrypt(workspace.mixpanel_project_id),
+        username: decrypt(workspace.mixpanel_username),
+        secret: decrypt(workspace.mixpanel_secret),
+      };
+      const [events, funnels, projectTz] = await Promise.all([
         executeTool('mixpanel_list_events', {}, workspace),
         executeTool('mixpanel_list_funnels', {}, workspace),
+        getMixpanelProjectTimezone(creds),
       ]);
       const eventsStr = JSON.stringify(events).slice(0, 3000);
-      const funnelsStr = JSON.stringify(funnels).slice(0, 1500);
-      discoveryContext = `\n\n--- PRE-LOADED MIXPANEL DISCOVERY DATA ---\nmixpanel_list_events result: ${eventsStr}\nmixpanel_list_funnels result: ${funnelsStr}\nINSTRUCTION: The above discovery data is already loaded. Do NOT call mixpanel_list_events or mixpanel_list_funnels again — skip directly to the actual data query.`;
+      // Format funnels as a readable list so Claude can reliably extract funnel_id and conversion_window
+      const funnelList = Array.isArray(funnels)
+        ? funnels.map(f => `  - id=${f.id} name="${f.name}" conversion_window=${f.conversion_window ?? f.conversion_window_seconds ?? 'unknown'} steps=${JSON.stringify(f.steps?.map(s => s.event) ?? [])}`)
+            .join('\n')
+        : JSON.stringify(funnels).slice(0, 1500);
+      discoveryContext = [
+        '\n\n--- PRE-LOADED MIXPANEL DISCOVERY DATA ---',
+        'Available events (use exact names in queries):',
+        eventsStr,
+        '',
+        'Available funnels:',
+        funnelList,
+        '',
+        projectTz ? `Mixpanel project timezone: ${projectTz} — use this timezone when interpreting dates and matching the dashboard.` : '',
+        '',
+        'INSTRUCTIONS FOR FUNNEL QUERIES:',
+        '1. Do NOT call mixpanel_list_events or mixpanel_list_funnels — data is above.',
+        '2. For step-to-step conversion questions, call mixpanel_funnel with:',
+        '   - funnel_id: copy the id field EXACTLY from the funnel above (integer)',
+        '   - conversion_window: copy the conversion_window value EXACTLY from the funnel above (do not guess)',
+        '   - Use the funnel whose steps match what the user is asking about',
+        '3. The funnel API returns numbers that match the Mixpanel dashboard exactly.',
+        '4. Never count funnel conversions by adding up daily segmentation values.',
+      ].join('\n');
     } catch (e) {
       console.log('[PrefetchError]', e.message);
     }

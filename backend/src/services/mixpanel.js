@@ -107,6 +107,21 @@ Always state: "From Mixpanel: N unique users converted (funnel, unique users)".`
   },
 ];
 
+/**
+ * Fetch the Mixpanel project timezone so date queries match the dashboard.
+ * Returns a timezone string like "America/Los_Angeles" or null on failure.
+ */
+export async function getMixpanelProjectTimezone(creds) {
+  try {
+    const data = await request('projects', {}, creds);
+    // API returns { results: { timezone: "..." } } or array
+    const tz = data?.results?.timezone ?? data?.[0]?.timezone ?? null;
+    return tz;
+  } catch {
+    return null;
+  }
+}
+
 export async function executeMixpanelTool(toolName, args, creds) {
   switch (toolName) {
     case 'mixpanel_segmentation': {

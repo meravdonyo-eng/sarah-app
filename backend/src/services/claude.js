@@ -277,7 +277,26 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   }
 
   const messageAddons = buildMessageAddons(userMessage);
-  const systemPrompt = dynamicHeader + '\n\n' + basePrompt + messageAddons;
+
+  // Pre-fetch Mixpanel discovery data and inject into system prompt.
+  // This eliminates 2 mandatory Claude tool-call iterations (~8s) per question.
+  let discoveryContext = '';
+  const hasMixpanel = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
+  if (hasMixpanel) {
+    try {
+      const [events, funnels] = await Promise.all([
+        executeTool('mixpanel_list_events', {}, workspace),
+        executeTool('mixpanel_list_funnels', {}, workspace),
+      ]);
+      const eventsStr = JSON.stringify(events).slice(0, 3000);
+      const funnelsStr = JSON.stringify(funnels).slice(0, 1500);
+      discoveryContext = `\n\n--- PRE-LOADED MIXPANEL DISCOVERY DATA ---\nmixpanel_list_events result: ${eventsStr}\nmixpanel_list_funnels result: ${funnelsStr}\nINSTRUCTION: The above discovery data is already loaded. Do NOT call mixpanel_list_events or mixpanel_list_funnels again — skip directly to the actual data query.`;
+    } catch (e) {
+      console.log('[PrefetchError]', e.message);
+    }
+  }
+
+  const systemPrompt = dynamicHeader + '\n\n' + basePrompt + messageAddons + discoveryContext;
 
   const messages = [
     ...sanitizeHistory(conversationHistory),

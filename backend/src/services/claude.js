@@ -143,6 +143,45 @@ const DISCOVERY_TTL_MS = 10 * 60 * 1000;
 // Only zero-arg discovery calls are cached (list_event_properties takes an event arg, so excluded)
 const DISCOVERY_TOOLS = new Set(['mixpanel_list_events', 'mixpanel_list_funnels']);
 
+// Cache for pre-fetched funnel results (last-30-days window, keyed by date so it refreshes daily)
+const prefetchedFunnelCache = new Map(); // key: `${workspaceId}:funnels30d:${toDate}` → { result, expiresAt }
+
+/**
+ * Pre-fetch funnel results for the last 30 days for all defined funnels (up to 3).
+ * Cached for 10 minutes. Returns array of parsed funnel results with _funnel_name and _period.
+ * This eliminates the need for Claude to call mixpanel_funnel for common "last month" questions.
+ */
+async function prefetchAllFunnelResults(funnels, workspace) {
+  if (!Array.isArray(funnels) || funnels.length === 0) return [];
+
+  const toDate = new Date().toISOString().split('T')[0];
+  const fromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const cacheKey = `${workspace.workspace_id}:funnels30d:${toDate}`;
+
+  const cached = prefetchedFunnelCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) {
+    console.log('[Cache] HIT funnel-prefetch');
+    return cached.result;
+  }
+
+  const funnelsToFetch = funnels.slice(0, 3);
+  const results = await Promise.allSettled(
+    funnelsToFetch.map(async (f) => {
+      const params = { funnel_id: f.id, from_date: fromDate, to_date: toDate };
+      // Use saved conversion_window if available — omit to let Mixpanel use its default
+      const cw = f.conversion_window ?? f.conversion_window_seconds;
+      if (cw) params.conversion_window = cw;
+      const result = await executeTool('mixpanel_funnel', params, workspace);
+      return { ...result, _funnel_name: f.name, _period: `${fromDate} to ${toDate}` };
+    })
+  );
+
+  const successful = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+  prefetchedFunnelCache.set(cacheKey, { result: successful, expiresAt: Date.now() + DISCOVERY_TTL_MS });
+  console.log(`[Cache] SET funnel-prefetch (${successful.length} funnels)`);
+  return successful;
+}
+
 async function executeTool(toolName, args, workspace) {
   if (toolName.startsWith('mixpanel_')) {
     const creds = {
@@ -332,25 +371,43 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         ? funnels.map(f => `  - id=${f.id} name="${f.name}" conversion_window=${f.conversion_window ?? f.conversion_window_seconds ?? 'unknown'} steps=${JSON.stringify(f.steps?.map(s => s.event) ?? [])}`)
             .join('\n')
         : JSON.stringify(funnels).slice(0, 1500);
+
+      // Pre-fetch actual funnel results for the last 30 days so Claude
+      // never needs to call mixpanel_funnel or mixpanel_segmentation for
+      // standard period questions — the numbers are already here.
+      const prefetchedFunnels = await prefetchAllFunnelResults(
+        Array.isArray(funnels) ? funnels : [],
+        workspace
+      );
+      const funnelResultsStr = prefetchedFunnels.length > 0
+        ? prefetchedFunnels.map(f =>
+            `Funnel "${f._funnel_name}" (${f._period}):\n${JSON.stringify(f)}`
+          ).join('\n\n')
+        : '';
+
       discoveryContext = [
-        '\n\n--- PRE-LOADED MIXPANEL DISCOVERY DATA ---',
-        'Available events (use exact names in queries):',
+        '\n\n--- PRE-LOADED MIXPANEL DATA (last 30 days) ---',
+        projectTz ? `Project timezone: ${projectTz}` : '',
+        '',
+        'Available events:',
         eventsStr,
         '',
-        'Available funnels:',
+        'Funnel definitions:',
         funnelList,
+        funnelResultsStr ? '' : '',
+        funnelResultsStr ? '=== PRE-FETCHED FUNNEL RESULTS (last 30 days) ===' : '',
+        funnelResultsStr ? funnelResultsStr : '',
+        funnelResultsStr ? '=== END FUNNEL RESULTS ===' : '',
         '',
-        projectTz ? `Mixpanel project timezone: ${projectTz} — use this timezone when interpreting dates and matching the dashboard.` : '',
-        '',
-        'INSTRUCTIONS FOR FUNNEL QUERIES:',
-        '1. Do NOT call mixpanel_list_events or mixpanel_list_funnels — data is above.',
-        '2. For step-to-step conversion questions, call mixpanel_funnel with:',
-        '   - funnel_id: copy the id field EXACTLY from the funnel above (integer)',
-        '   - conversion_window: copy the conversion_window value EXACTLY from the funnel above (do not guess)',
-        '   - Use the funnel whose steps match what the user is asking about',
-        '3. The funnel API returns numbers that match the Mixpanel dashboard exactly.',
-        '4. Never count funnel conversions by adding up daily segmentation values.',
-      ].join('\n');
+        '⚠️ CRITICAL INSTRUCTIONS:',
+        '1. Do NOT call mixpanel_list_events, mixpanel_list_funnels — data is above.',
+        funnelResultsStr
+          ? '2. Do NOT call mixpanel_funnel or mixpanel_segmentation for "last month" questions — funnel results are pre-loaded above. Read unique_users directly from the steps array.'
+          : '2. For conversion/step questions, call mixpanel_funnel (never segmentation).',
+        '3. If user asks for a DIFFERENT time range (not last 30 days), then call mixpanel_funnel with those specific dates.',
+        '4. NEVER count users by summing daily segmentation values.',
+        '5. Always state: "X unique users (from pre-loaded funnel)" or "X unique users (funnel, <date range>)".',
+      ].filter(l => l !== null).join('\n');
     } catch (e) {
       console.log('[PrefetchError]', e.message);
     }

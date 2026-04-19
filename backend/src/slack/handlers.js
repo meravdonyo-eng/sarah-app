@@ -13,7 +13,7 @@ import {
 import { getCachedSnapshot, setCachedSnapshot } from '../services/snapshotCache.js';
 import { generateSnapshot } from '../services/snapshot.js';
 import { encrypt } from '../services/encryption.js';
-import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectBaselineQuery } from '../services/claude.js';
+import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectBaselineQuery, detectFunnelQuestion } from '../services/claude.js';
 import {
   formatResponse,
   formatResponseSmart,
@@ -108,7 +108,7 @@ export async function handleMessage({ message, say, client, context }) {
   }
 
   // --- Regular message → Claude ---
-  const isComplex = detectJiraMandate(text) || detectBaselineQuery(text);
+  const isComplex = detectJiraMandate(text) || detectBaselineQuery(text) || detectFunnelQuestion(text);
   const thinkingMsg = await say({
     blocks: formatThinking(isComplex),
     text: 'Sarah is thinking...',

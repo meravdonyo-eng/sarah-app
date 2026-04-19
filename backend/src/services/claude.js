@@ -198,6 +198,20 @@ function sanitizeHistory(history) {
   return history.slice(start);
 }
 
+// --- Funnel Mandate: step-to-step conversion questions must use mixpanel_funnel ---
+const FUNNEL_KEYWORDS = [
+  'funnel', 'conversion', 'converted', 'drop', 'drop-off', 'dropoff', 'dropout',
+  'completed', 'activated', 'onboarding', 'sign up', 'signup', 'checkout',
+  'how many', 'how much', 'מתוך', 'כמה', 'שיעור', 'המרה', 'נשרו', 'השלימו',
+  'מי ש', 'among', 'of those', 'of the', 'who did', 'who completed',
+  'step', 'שלב',
+];
+
+export function detectFunnelQuestion(question) {
+  const lower = question.toLowerCase();
+  return FUNNEL_KEYWORDS.some(kw => lower.includes(kw));
+}
+
 // --- Jira Mandate ---
 const JIRA_KEYWORDS = ['bug', 'error', 'crash', 'support', 'ticket', 'fix', 'load', 'timeout', 'failure', 'incident', 'broken', 'issue', 'outage', 'down', 'slow'];
 
@@ -216,6 +230,15 @@ export function detectBaselineQuery(question) {
 
 function buildMessageAddons(userMessage) {
   const addons = [];
+
+  if (detectFunnelQuestion(userMessage)) {
+    addons.push(
+      'FUNNEL MANDATE ACTIVE: This question is about conversion or step-to-step flow.\n' +
+      'RULE: NEVER use mixpanel_segmentation to count funnel steps. Segmentation counts all users who fired an event — it ignores the conversion window and sequence, so numbers WILL differ from the dashboard (e.g. 28 vs 27, 75% vs 74.07%).\n' +
+      'CORRECT approach: call mixpanel_list_funnels → identify the relevant funnel → call mixpanel_funnel with the exact funnel_id and conversion_window.\n' +
+      'The funnel API matches the Mixpanel dashboard exactly. Always state: "From Mixpanel funnel: N unique users (funnel, unique users)".'
+    );
+  }
 
   if (detectJiraMandate(userMessage)) {
     addons.push('JIRA MANDATE ACTIVE: This question contains bug/error/support keywords. Pull Jira FIRST before any Mixpanel analysis. Jira = primary source. Mixpanel = validation only.');

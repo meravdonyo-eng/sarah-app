@@ -165,18 +165,42 @@ async function prefetchAllFunnelResults(funnels, workspace) {
   }
 
   const funnelsToFetch = funnels.slice(0, 3);
+  // Log the raw funnel structure so we can debug field names (id vs funnel_id, steps format)
+  console.log('[FunnelPrefetch] Raw funnels sample:', JSON.stringify(funnelsToFetch[0]).slice(0, 400));
+
   const results = await Promise.allSettled(
     funnelsToFetch.map(async (f) => {
-      // Use MODE A (ad-hoc events array) — same approach as the official Mixpanel MCP.
-      // This avoids funnel_id/conversion_window mismatches and matches dashboard exactly.
-      const stepEvents = (f.steps ?? []).map(s => s.event ?? s).filter(Boolean);
-      const params = stepEvents.length > 0
-        ? { events: stepEvents, from_date: fromDate, to_date: toDate, conversion_window: 7 }
-        : { funnel_id: f.id, from_date: fromDate, to_date: toDate }; // fallback
+      // Extract step event names — handle both {event: "name"} and "name" formats
+      const rawSteps = f.steps ?? f.events ?? [];
+      const stepEvents = rawSteps
+        .map(s => (typeof s === 'string' ? s : s.event ?? s.eventName ?? s.name ?? null))
+        .filter(Boolean);
+
+      // funnel_id field may be "id" or "funnel_id" depending on Mixpanel API version
+      const funnelId = f.id ?? f.funnel_id;
+
+      let params;
+      if (stepEvents.length > 0) {
+        // MODE A: ad-hoc — build funnel from event names (preferred, no funnel_id needed)
+        // conversion_window: Mixpanel /api/2.0/funnels expects seconds — 7 days = 604800
+        params = { events: stepEvents, from_date: fromDate, to_date: toDate, conversion_window: 604800 };
+      } else if (funnelId) {
+        // MODE B: fallback to saved funnel ID
+        params = { funnel_id: funnelId, from_date: fromDate, to_date: toDate };
+      } else {
+        throw new Error(`Funnel "${f.name}" has no steps and no id — cannot query`);
+      }
+
+      console.log(`[FunnelPrefetch] Querying "${f.name}" mode=${stepEvents.length > 0 ? 'events' : 'id'} steps=${JSON.stringify(stepEvents)}`);
       const result = await executeTool('mixpanel_funnel', params, workspace);
       return { ...result, _funnel_name: f.name, _period: `${fromDate} to ${toDate}` };
     })
   );
+
+  // Log any failures so we can diagnose API errors
+  results.filter(r => r.status === 'rejected').forEach(r => {
+    console.error('[FunnelPrefetch] FAILED:', r.reason?.response?.data ?? r.reason?.message ?? r.reason);
+  });
 
   const successful = results.filter(r => r.status === 'fulfilled').map(r => r.value);
   prefetchedFunnelCache.set(cacheKey, { result: successful, expiresAt: Date.now() + DISCOVERY_TTL_MS });
@@ -430,8 +454,12 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
   const systemPrompt = dynamicHeader + '\n\n' + basePrompt + messageAddons + discoveryContext;
 
+  const sanitizedHistory = sanitizeHistory(conversationHistory);
+  // Track where current-turn messages start (after history + current user msg)
+  const currentTurnStartIdx = sanitizedHistory.length + 1;
+
   const messages = [
-    ...sanitizeHistory(conversationHistory),
+    ...sanitizedHistory,
     { role: 'user', content: userMessage },
   ];
 
@@ -510,22 +538,21 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
   messages.push({ role: 'assistant', content: response.content });
 
-  // Validation: log which Mixpanel tools were used so we can verify
-  // that user-count questions used funnel or unique segmentation (not raw events).
-  const toolsUsed = messages
+  // Validation: log which Mixpanel tools were used in THIS turn only (not history).
+  // currentTurnStartIdx marks where the current request's messages begin.
+  const currentTurnMsgs = messages.slice(currentTurnStartIdx);
+  const toolsUsed = currentTurnMsgs
     .flatMap(m => (Array.isArray(m.content) ? m.content : []))
     .filter(b => b.type === 'tool_use' && b.name?.startsWith('mixpanel_'))
     .map(b => {
       const type = b.input?.type ? `(type=${b.input.type})` : '';
       return `${b.name}${type}`;
     });
-  if (toolsUsed.length > 0) {
-    const hasRawSegmentation = toolsUsed.some(t => t.includes('segmentation') && t.includes('type=general'));
-    const hasFunnel = toolsUsed.some(t => t.includes('funnel') && !t.includes('list'));
-    console.log(`[MixpanelValidation] tools=${toolsUsed.join(', ')} | funnel=${hasFunnel} | rawEvents=${hasRawSegmentation}`);
-    if (hasRawSegmentation && !hasFunnel) {
-      console.warn('[MixpanelValidation] WARNING: user-count question may have used raw event count — check for type=general without funnel');
-    }
+  const hasRawSegmentation = toolsUsed.some(t => t.includes('segmentation') && t.includes('type=general'));
+  const hasFunnel = toolsUsed.some(t => t.includes('funnel') && !t.includes('list'));
+  console.log(`[MixpanelValidation] tools=${toolsUsed.join(', ') || '(none)'} | funnel=${hasFunnel} | rawEvents=${hasRawSegmentation}`);
+  if (hasRawSegmentation && !hasFunnel) {
+    console.warn('[MixpanelValidation] WARNING: used raw event count without funnel — check type=general');
   }
 
   const textBlock = response.content.find((b) => b.type === 'text');

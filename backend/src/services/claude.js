@@ -278,6 +278,12 @@ function buildDynamicHeader(workspace) {
     jiraProjectLine,
     `DATA FRESHNESS RULE: NEVER say "I already answered this" and repeat a prior number. For ANY question about metrics, counts, or conversions — always make a fresh tool call. Numbers in conversation history may be wrong. If asked to recheck, call the tool again (do NOT re-add daily numbers already mentioned in history).`,
     `FUNNEL RULE: For step-to-step conversion questions (how many users went from X to Y), ALWAYS use mixpanel_funnel — never count by adding segmentation values. Segmentation and funnel give different numbers because of the conversion window. The funnel number matches the Mixpanel dashboard exactly.`,
+    `MIXPANEL COUNTING RULE — MANDATORY: Every Mixpanel number you report must come from unique users, not total event occurrences.`,
+    `  • mixpanel_segmentation → only valid if type='unique' (default). type='general' counts total events — do not use for user counts.`,
+    `  • mixpanel_funnel → always counts unique users who completed all steps in sequence. Use for any conversion/step question.`,
+    `  • NEVER count users by summing raw event totals, daily values, or segmentation without type='unique'.`,
+    `  • After every Mixpanel query: confirm the tool used was funnel or unique segmentation before reporting.`,
+    `  • Always state the method explicitly: "X unique users (funnel)" or "X unique users (unique segmentation)".`,
   ].filter(Boolean).join('\n');
 }
 
@@ -431,6 +437,24 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   }
 
   messages.push({ role: 'assistant', content: response.content });
+
+  // Validation: log which Mixpanel tools were used so we can verify
+  // that user-count questions used funnel or unique segmentation (not raw events).
+  const toolsUsed = messages
+    .flatMap(m => (Array.isArray(m.content) ? m.content : []))
+    .filter(b => b.type === 'tool_use' && b.name?.startsWith('mixpanel_'))
+    .map(b => {
+      const type = b.input?.type ? `(type=${b.input.type})` : '';
+      return `${b.name}${type}`;
+    });
+  if (toolsUsed.length > 0) {
+    const hasRawSegmentation = toolsUsed.some(t => t.includes('segmentation') && t.includes('type=general'));
+    const hasFunnel = toolsUsed.some(t => t.includes('funnel') && !t.includes('list'));
+    console.log(`[MixpanelValidation] tools=${toolsUsed.join(', ')} | funnel=${hasFunnel} | rawEvents=${hasRawSegmentation}`);
+    if (hasRawSegmentation && !hasFunnel) {
+      console.warn('[MixpanelValidation] WARNING: user-count question may have used raw event count — check for type=general without funnel');
+    }
+  }
 
   const textBlock = response.content.find((b) => b.type === 'text');
   return {

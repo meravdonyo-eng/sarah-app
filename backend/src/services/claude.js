@@ -167,10 +167,12 @@ async function prefetchAllFunnelResults(funnels, workspace) {
   const funnelsToFetch = funnels.slice(0, 3);
   const results = await Promise.allSettled(
     funnelsToFetch.map(async (f) => {
-      const params = { funnel_id: f.id, from_date: fromDate, to_date: toDate };
-      // Use saved conversion_window if available — omit to let Mixpanel use its default
-      const cw = f.conversion_window ?? f.conversion_window_seconds;
-      if (cw) params.conversion_window = cw;
+      // Use MODE A (ad-hoc events array) — same approach as the official Mixpanel MCP.
+      // This avoids funnel_id/conversion_window mismatches and matches dashboard exactly.
+      const stepEvents = (f.steps ?? []).map(s => s.event ?? s).filter(Boolean);
+      const params = stepEvents.length > 0
+        ? { events: stepEvents, from_date: fromDate, to_date: toDate, conversion_window: 7 }
+        : { funnel_id: f.id, from_date: fromDate, to_date: toDate }; // fallback
       const result = await executeTool('mixpanel_funnel', params, workspace);
       return { ...result, _funnel_name: f.name, _period: `${fromDate} to ${toDate}` };
     })
@@ -402,11 +404,12 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         '⚠️ CRITICAL INSTRUCTIONS:',
         '1. Do NOT call mixpanel_list_events, mixpanel_list_funnels — data is above.',
         funnelResultsStr
-          ? '2. Do NOT call mixpanel_funnel or mixpanel_segmentation for "last month" questions — funnel results are pre-loaded above. Read unique_users directly from the steps array.'
+          ? `2. PRE-LOADED DATA covers exactly: ${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} to ${new Date().toISOString().split('T')[0]} (last 30 days). Use unique_users from the steps array ONLY for questions about this period. Do NOT call mixpanel_funnel or mixpanel_segmentation for this period.`
           : '2. For conversion/step questions, call mixpanel_funnel (never segmentation).',
-        '3. If user asks for a DIFFERENT time range (not last 30 days), then call mixpanel_funnel with those specific dates.',
-        '4. NEVER count users by summing daily segmentation values.',
-        '5. Always state: "X unique users (from pre-loaded funnel)" or "X unique users (funnel, <date range>)".',
+        '3. DATE RANGE MISMATCH RULE: If user asks about a DIFFERENT time range (last week, last quarter, specific dates, etc.) — call mixpanel_funnel with those exact dates AND the events array (e.g. events=["Sign Up Started","Activated"]). Never use the pre-loaded 30-day data for a different period.',
+        '4. AD-HOC FUNNELS: mixpanel_funnel accepts events=["Event A","Event B","Event C"] — no funnel_id needed. Use this for ANY conversion question, even if those events are not in a saved funnel.',
+        '5. NEVER count users by summing daily segmentation values.',
+        '6. Always state the source and period: "X unique users (funnel, last 30 days)" or "X unique users (funnel, <from> to <to>)".',
       ].filter(l => l !== null).join('\n');
     } catch (e) {
       console.log('[PrefetchError]', e.message);

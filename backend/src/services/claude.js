@@ -140,7 +140,8 @@ function buildTools(workspace) {
 // Cache for Mixpanel discovery calls (list_events, list_funnels) — TTL 10 min
 const mixpanelDiscoveryCache = new Map(); // key: `${workspaceId}:${toolName}` → { result, expiresAt }
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
-const DISCOVERY_TOOLS = new Set(['mixpanel_list_events', 'mixpanel_list_funnels', 'mixpanel_list_event_properties']);
+// Only zero-arg discovery calls are cached (list_event_properties takes an event arg, so excluded)
+const DISCOVERY_TOOLS = new Set(['mixpanel_list_events', 'mixpanel_list_funnels']);
 
 async function executeTool(toolName, args, workspace) {
   if (toolName.startsWith('mixpanel_')) {

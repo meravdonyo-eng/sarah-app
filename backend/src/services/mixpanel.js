@@ -19,7 +19,12 @@ async function request(endpoint, params, creds) {
 export const MIXPANEL_TOOLS = [
   {
     name: 'mixpanel_segmentation',
-    description: 'Query unique user counts and trends over time from Mixpanel. Always counts unique users, not total event occurrences.',
+    description: `Query event counts from Mixpanel over time.
+COUNTING MODE — choose carefully:
+- type="unique" → counts UNIQUE USERS who triggered the event (default). Use for: "how many users did X", activation, sign-ups, feature adoption.
+- type="general" → counts TOTAL EVENT OCCURRENCES. Use for: error frequency, page views, how many times X happened.
+WARNING: For funnel conversion counts (e.g. "how many users completed sign-up"), prefer mixpanel_funnel — it applies the correct conversion window and matches the Mixpanel dashboard. Using segmentation for funnel steps can produce different numbers (e.g. 31 vs 28) because segmentation counts all users who ever fired the event, while the funnel counts users who completed all steps within the window.
+Always state the counting method in your response: "From Mixpanel: N unique users" or "From Mixpanel: N total events".`,
     input_schema: {
       type: 'object',
       properties: {
@@ -27,6 +32,11 @@ export const MIXPANEL_TOOLS = [
         from_date: { type: 'string', description: 'Start date YYYY-MM-DD (required, always explicit)' },
         to_date: { type: 'string', description: 'End date YYYY-MM-DD (required, always explicit)' },
         unit: { type: 'string', enum: ['hour', 'day', 'week', 'month'], description: 'Time unit' },
+        type: {
+          type: 'string',
+          enum: ['unique', 'general'],
+          description: 'unique = count distinct users (default, matches dashboard user counts). general = count total event occurrences (use for error frequency, page views).',
+        },
         where: { type: 'string', description: 'Filter expression (e.g. \'properties["$os"] == "iOS"\') — must be identical across all calls in the same analysis' },
         on: { type: 'string', description: 'Property to segment by (e.g. \'properties["$os"]\')' },
       },
@@ -35,7 +45,7 @@ export const MIXPANEL_TOOLS = [
   },
   {
     name: 'mixpanel_retention',
-    description: 'Query user retention data from Mixpanel. Counts unique users.',
+    description: 'Query user retention data from Mixpanel. Always counts unique users (users who returned, not event occurrences). Always state: "From Mixpanel: N% retention (unique users)".',
     input_schema: {
       type: 'object',
       properties: {
@@ -49,7 +59,12 @@ export const MIXPANEL_TOOLS = [
   },
   {
     name: 'mixpanel_funnel',
-    description: 'Query funnel conversion data from Mixpanel. Use mixpanel_list_funnels first to get funnel_id and its conversion_window.',
+    description: `Query funnel conversion data from Mixpanel.
+IMPORTANT: This is the ONLY tool that matches the Mixpanel dashboard funnel numbers exactly. It counts unique users who completed all funnel steps within the conversion window.
+Use for: "how many users completed sign-up / onboarding / checkout / any multi-step flow".
+Do NOT use segmentation to count funnel steps — it gives different numbers (no conversion window applied).
+Always call mixpanel_list_funnels first to get funnel_id and conversion_window.
+Always state: "From Mixpanel: N unique users converted (funnel, unique users)".`,
     input_schema: {
       type: 'object',
       properties: {
@@ -79,6 +94,17 @@ export const MIXPANEL_TOOLS = [
       properties: {},
     },
   },
+  {
+    name: 'mixpanel_list_event_properties',
+    description: 'List all properties tracked for a specific event. Use this before filtering with "where" to confirm the exact property name and its values.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        event: { type: 'string', description: 'Event name to get properties for' },
+      },
+      required: ['event'],
+    },
+  },
 ];
 
 export async function executeMixpanelTool(toolName, args, creds) {
@@ -89,7 +115,9 @@ export async function executeMixpanelTool(toolName, args, creds) {
         from_date: args.from_date,
         to_date: args.to_date,
         unit: args.unit || 'day',
-        type: 'unique',
+        // Default to 'unique' (distinct users). Claude should explicitly pass
+        // type='general' only when counting total event occurrences (errors, page views).
+        type: args.type || 'unique',
       };
       if (args.where) params.where = args.where;
       if (args.on) params.on = args.on;
@@ -123,6 +151,12 @@ export async function executeMixpanelTool(toolName, args, creds) {
 
     case 'mixpanel_list_events':
       return request('events/names', { type: 'unique' }, creds);
+
+    case 'mixpanel_list_event_properties':
+      return request('events/properties', {
+        event: args.event,
+        type: 'unique',
+      }, creds);
 
     default:
       throw new Error(`Unknown Mixpanel tool: ${toolName}`);

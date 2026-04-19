@@ -330,7 +330,19 @@ function buildDynamicHeader(workspace) {
 
 export async function sendMessageWithTools(workspace, userMessage, conversationHistory = [], signal = null) {
   const anthropic = getClient();
-  const tools = buildTools(workspace);
+  let tools = buildTools(workspace);
+
+  // For funnel/conversion questions, remove mixpanel_segmentation from available tools.
+  // Text mandates alone don't prevent Claude from calling segmentation — it ignores them.
+  // Removing the tool is the only reliable enforcement: Claude literally cannot misuse it.
+  if (detectFunnelQuestion(userMessage)) {
+    const before = tools.length;
+    tools = tools.filter(t => t.name !== 'mixpanel_segmentation');
+    if (tools.length < before) {
+      console.log('[ToolFilter] Removed mixpanel_segmentation for funnel question — funnel tool only');
+    }
+  }
+
   const dynamicHeader = buildDynamicHeader(workspace);
 
   let basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);

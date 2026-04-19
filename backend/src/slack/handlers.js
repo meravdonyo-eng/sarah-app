@@ -13,7 +13,7 @@ import {
 import { getCachedSnapshot, setCachedSnapshot } from '../services/snapshotCache.js';
 import { generateSnapshot } from '../services/snapshot.js';
 import { encrypt } from '../services/encryption.js';
-import { sendMessageWithTools, isJiraValid } from '../services/claude.js';
+import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectBaselineQuery } from '../services/claude.js';
 import {
   formatResponse,
   formatResponseSmart,
@@ -31,6 +31,9 @@ const JIRA_AUTH_URL = (workspaceId) =>
 
 // Tracks users currently going through Mixpanel setup flow
 const mixpanelSetupState = new Map(); // slackUserId -> { step, projectId, username }
+
+// Tracks in-progress Claude requests so they can be cancelled
+const activeRequests = new Map(); // slackUserId -> { abortController, channelId, thinkingTs }
 
 const GREETING_PATTERN = /^(hi|hey|hello|shalom|שלום|היי|הי|בוקר טוב|צהריים טובים|ערב טוב|מה נשמע|מה קורה|yo|sup)[\s!?.]*$/i;
 const STATUS_PATTERN = /^(status|סטטוס|integrations|חיבורים)[\s!?.]*$/i;
@@ -105,11 +108,19 @@ export async function handleMessage({ message, say, client, context }) {
   }
 
   // --- Regular message → Claude ---
-  const thinkingMsg = await say({ blocks: formatThinking() });
+  const isComplex = detectJiraMandate(text) || detectBaselineQuery(text);
+  const thinkingMsg = await say({
+    blocks: formatThinking(isComplex),
+    text: 'Sarah is thinking...',
+  });
+
+  const abortController = new AbortController();
+  activeRequests.set(userId, { abortController, channelId, thinkingTs: thinkingMsg.ts });
 
   try {
     const history = await getConversationHistory(workspaceId, userId, channelId);
-    const result = await sendMessageWithTools(workspace, text, history);
+    const result = await sendMessageWithTools(workspace, text, history, abortController.signal);
+    activeRequests.delete(userId);
     await saveConversationHistory(workspaceId, userId, channelId, result.conversationHistory);
 
     await client.chat.update({
@@ -144,6 +155,16 @@ export async function handleMessage({ message, say, client, context }) {
       });
     }
   } catch (err) {
+    activeRequests.delete(userId);
+    if (err.name === 'AbortError' || err.message?.includes('abort')) {
+      await client.chat.update({
+        channel: channelId,
+        ts: thinkingMsg.ts,
+        blocks: formatError('Cancelled. Feel free to ask again.'),
+        text: 'Cancelled',
+      });
+      return;
+    }
     console.error('Claude error:', err);
     await client.chat.update({
       channel: channelId,
@@ -356,6 +377,21 @@ export async function handleAction({ action, ack, say, body, context, client }) 
   const workspaceId = body.team?.id || context.teamId;
   const userId = body.user?.id;
   console.log(`[ACTION] action_id=${action.action_id} userId=${userId} workspaceId=${workspaceId}`);
+
+  if (action.action_id === 'cancel_sarah') {
+    const active = activeRequests.get(userId);
+    if (active) {
+      active.abortController.abort();
+      activeRequests.delete(userId);
+      await client.chat.update({
+        channel: active.channelId,
+        ts: active.thinkingTs,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '_Cancelled. Feel free to ask again._' } }],
+        text: 'Cancelled',
+      });
+    }
+    return;
+  }
 
   if (action.action_id === 'read_more') {
     const rest = await popReadMore(action.value);

@@ -313,11 +313,23 @@ export async function formatResponseSmart(text) {
   return blocks;
 }
 
-export function formatThinking() {
+export function formatThinking(isComplex = false) {
+  const msg = isComplex
+    ? '_Sarah is cross-referencing Mixpanel and Jira — this may take a few seconds..._'
+    : '_Sarah is thinking..._';
   return [
     {
       type: 'section',
-      text: { type: 'mrkdwn', text: '_Sarah is thinking..._' },
+      text: { type: 'mrkdwn', text: msg },
+    },
+    {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: '✕ Cancel' },
+        action_id: 'cancel_sarah',
+        style: 'danger',
+      }],
     },
   ];
 }

@@ -137,6 +137,11 @@ function buildTools(workspace) {
   return tools;
 }
 
+// Cache for Mixpanel discovery calls (list_events, list_funnels) — TTL 10 min
+const mixpanelDiscoveryCache = new Map(); // key: `${workspaceId}:${toolName}` → { result, expiresAt }
+const DISCOVERY_TTL_MS = 10 * 60 * 1000;
+const DISCOVERY_TOOLS = new Set(['mixpanel_list_events', 'mixpanel_list_funnels', 'mixpanel_list_event_properties']);
+
 async function executeTool(toolName, args, workspace) {
   if (toolName.startsWith('mixpanel_')) {
     const creds = {
@@ -144,6 +149,21 @@ async function executeTool(toolName, args, workspace) {
       username: decrypt(workspace.mixpanel_username),
       secret: decrypt(workspace.mixpanel_secret),
     };
+
+    // Use cache for discovery calls (no args that vary per question)
+    if (DISCOVERY_TOOLS.has(toolName) && Object.keys(args).length === 0) {
+      const cacheKey = `${workspace.workspace_id}:${toolName}`;
+      const cached = mixpanelDiscoveryCache.get(cacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        console.log(`[Cache] HIT ${toolName}`);
+        return cached.result;
+      }
+      const result = await executeMixpanelTool(toolName, args, creds);
+      mixpanelDiscoveryCache.set(cacheKey, { result, expiresAt: Date.now() + DISCOVERY_TTL_MS });
+      console.log(`[Cache] SET ${toolName}`);
+      return result;
+    }
+
     return executeMixpanelTool(toolName, args, creds);
   }
   if (toolName.startsWith('jira_')) {
@@ -180,7 +200,7 @@ function sanitizeHistory(history) {
 // --- Jira Mandate ---
 const JIRA_KEYWORDS = ['bug', 'error', 'crash', 'support', 'ticket', 'fix', 'load', 'timeout', 'failure', 'incident', 'broken', 'issue', 'outage', 'down', 'slow'];
 
-function detectJiraMandate(question) {
+export function detectJiraMandate(question) {
   const lower = question.toLowerCase();
   return JIRA_KEYWORDS.some(kw => lower.includes(kw));
 }
@@ -188,7 +208,7 @@ function detectJiraMandate(question) {
 // --- Baseline Query (extended date range) ---
 const BASELINE_KEYWORDS = ['after fix', 'after the fix', 'after fixing', 'before and after', 'did it improve', 'did it help', 'impact of', 'effect of', 'since the fix', 'since we fixed', 'since deploying', 'post fix', 'post-fix', 'post deploy', 'after deploy', 'decrease in errors', 'increase in completion'];
 
-function detectBaselineQuery(question) {
+export function detectBaselineQuery(question) {
   const lower = question.toLowerCase();
   return BASELINE_KEYWORDS.some(kw => lower.includes(kw));
 }
@@ -235,7 +255,7 @@ function buildDynamicHeader(workspace) {
   ].filter(Boolean).join('\n');
 }
 
-export async function sendMessageWithTools(workspace, userMessage, conversationHistory = []) {
+export async function sendMessageWithTools(workspace, userMessage, conversationHistory = [], signal = null) {
   const anthropic = getClient();
   const tools = buildTools(workspace);
   const dynamicHeader = buildDynamicHeader(workspace);
@@ -285,11 +305,13 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }));
   }
 
-  let response = await anthropic.messages.create(requestOptions);
+  let response = await anthropic.messages.create(requestOptions, signal ? { signal } : undefined);
   let iterations = 0;
-  const maxIterations = 15;
+  const maxIterations = 10;
 
   while (response.stop_reason === 'tool_use' && iterations < maxIterations) {
+    if (signal?.aborted) throw new Error('AbortError');
+
     iterations++;
     const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
 

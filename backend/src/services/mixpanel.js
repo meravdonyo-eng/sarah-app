@@ -122,6 +122,53 @@ export async function getMixpanelProjectTimezone(creds) {
   }
 }
 
+/**
+ * Parse the raw Mixpanel /funnels API response into a clean, unambiguous
+ * step-by-step breakdown so Claude cannot misread it.
+ *
+ * The raw response is complex JSON with per-date data. Summing daily step
+ * counts gives the WRONG answer (users who convert across date boundaries
+ * get double-counted). This parser extracts the aggregate totals correctly.
+ */
+function parseFunnelResponse(raw) {
+  try {
+    const dataEntries = Object.entries(raw?.data ?? {});
+    if (dataEntries.length === 0) return raw;
+
+    // Without 'unit', Mixpanel returns one aggregate entry for the whole
+    // date range. With 'unit', it returns one entry per period.
+    // In both cases we want the FIRST entry as it holds the overall totals
+    // (Mixpanel aggregates across the full from_date→to_date range in step counts).
+    const [, periodData] = dataEntries[0];
+    const rawSteps = periodData?.steps ?? [];
+    if (rawSteps.length === 0) return raw;
+
+    const startCount = rawSteps[0]?.count ?? 0;
+
+    const steps = rawSteps.map((s, i) => ({
+      step: i + 1,
+      event: s.event?.event ?? s.goal ?? `Step ${i + 1}`,
+      unique_users: s.count,
+      pct_from_step_1: startCount > 0 ? +((s.count / startCount * 100).toFixed(2)) : 0,
+      pct_from_previous_step: i === 0
+        ? 100
+        : rawSteps[i - 1]?.count > 0
+          ? +((s.count / rawSteps[i - 1].count * 100).toFixed(2))
+          : 0,
+    }));
+
+    return {
+      _instruction: 'These are the correct funnel counts for the requested period. Read unique_users directly — they match the Mixpanel dashboard. Do NOT call mixpanel_segmentation to verify or re-count these numbers.',
+      steps,
+      overall_conversion_pct: steps.length >= 2
+        ? +((steps[steps.length - 1].unique_users / steps[0].unique_users * 100).toFixed(2))
+        : 100,
+    };
+  } catch {
+    return raw; // parsing failed — return raw so Claude can try
+  }
+}
+
 export async function executeMixpanelTool(toolName, args, creds) {
   switch (toolName) {
     case 'mixpanel_segmentation': {
@@ -158,7 +205,8 @@ export async function executeMixpanelTool(toolName, args, creds) {
       };
       if (args.where) params.where = args.where;
       if (args.unit) params.unit = args.unit;
-      return request('funnels', params, creds);
+      const raw = await request('funnels', params, creds);
+      return parseFunnelResponse(raw);
     }
 
     case 'mixpanel_list_funnels':

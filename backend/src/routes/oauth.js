@@ -1,5 +1,6 @@
 import express from 'express';
 import { buildJiraAuthUrl, exchangeJiraCode } from '../services/jira.js';
+import { trackJiraConnected } from '../services/sarahAnalytics.js';
 
 const router = express.Router();
 
@@ -28,6 +29,8 @@ router.get('/jira/callback', async (req, res) => {
 
   try {
     await exchangeJiraCode(code, workspaceId);
+    // Gap 3 — Jira Connected event (workspace_id used as distinct_id; no per-user id here)
+    trackJiraConnected(workspaceId, workspaceId).catch(() => {});
     res.send(html('Jira Connected!', `
       <p>✅ Jira חובר בהצלחה!</p>
       <p>אפשר לחזור לSlack ולהתחיל לשאול שאלות.</p>

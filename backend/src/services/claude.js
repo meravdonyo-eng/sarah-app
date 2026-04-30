@@ -352,14 +352,16 @@ function buildDynamicHeader(workspace) {
   ].filter(Boolean).join('\n');
 }
 
-export async function sendMessageWithTools(workspace, userMessage, conversationHistory = [], signal = null) {
+export async function sendMessageWithTools(workspace, userMessage, conversationHistory = [], signal = null, options = {}) {
   const anthropic = getClient();
   let tools = buildTools(workspace);
 
   // For funnel/conversion questions, remove mixpanel_segmentation from available tools.
   // Text mandates alone don't prevent Claude from calling segmentation — it ignores them.
   // Removing the tool is the only reliable enforcement: Claude literally cannot misuse it.
-  if (detectFunnelQuestion(userMessage)) {
+  // Skip this filter for internal calls (e.g. snapshot) which legitimately need segmentation
+  // for non-funnel queries (error counts) even though the prompt contains funnel keywords.
+  if (!options.skipToolFilter && detectFunnelQuestion(userMessage)) {
     const before = tools.length;
     tools = tools.filter(t => t.name !== 'mixpanel_segmentation');
     if (tools.length < before) {
@@ -484,7 +486,26 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }));
   }
 
-  let response = await anthropic.messages.create(requestOptions, signal ? { signal } : undefined);
+  // Retry + 30s timeout wrapper — Bug 7
+  async function createWithRetry(opts, retries = 2) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        return await Promise.race([
+          anthropic.messages.create(opts, signal ? { signal } : undefined),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('TIMEOUT')), 30_000)
+          ),
+        ]);
+      } catch (err) {
+        if (err.message === 'TIMEOUT' || err.name === 'AbortError') throw err; // no retry on abort
+        if (attempt === retries) throw err;
+        console.warn(`[ClaudeRetry] attempt ${attempt} failed: ${err.message} — retrying...`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+      }
+    }
+  }
+
+  let response = await createWithRetry(requestOptions);
   let iterations = 0;
   const maxIterations = 10;
 
@@ -533,7 +554,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }
 
     messages.push({ role: 'user', content: toolResults });
-    response = await anthropic.messages.create({ ...requestOptions, messages });
+    response = await createWithRetry({ ...requestOptions, messages });
   }
 
   messages.push({ role: 'assistant', content: response.content });
@@ -559,5 +580,6 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   return {
     response: textBlock?.text || '',
     conversationHistory: messages,
+    usage: response.usage || null, // { input_tokens, output_tokens } for cost tracking
   };
 }

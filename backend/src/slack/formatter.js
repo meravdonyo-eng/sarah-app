@@ -24,16 +24,116 @@ function isRTL(text) {
   return hebrewChars > text.length * 0.2;
 }
 
-function chunkText(text, maxLen = 3000) {
-  const chunks = [];
-  let remaining = text;
-  while (remaining.length > maxLen) {
-    const cutAt = remaining.lastIndexOf('\n', maxLen) || maxLen;
-    chunks.push(remaining.slice(0, cutAt));
-    remaining = remaining.slice(cutAt).trimStart();
+/**
+ * Word-wraps a single LTR line at maxLen chars.
+ * Skips RTL lines and lines that contain a URL.
+ */
+function wrapLine(text, maxLen = 75) {
+  if (isRTL(text)) return text;
+  if (/https?:\/\/\S+/.test(text)) return text;
+  if (text.length <= maxLen) return text;
+  const words = text.split(' ');
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    if (current.length === 0) {
+      current = word;
+    } else if (current.length + 1 + word.length <= maxLen) {
+      current += ' ' + word;
+    } else {
+      lines.push(current);
+      current = word;
+    }
   }
-  if (remaining) chunks.push(remaining);
-  return chunks;
+  if (current) lines.push(current);
+  return lines.join('\n');
+}
+
+/**
+ * Classifies each line: header | bullet | text | spacer
+ */
+function parseSections(text) {
+  return text.split('\n').map(line => {
+    if (line.trim() === '') return { type: 'spacer', raw: '' };
+    if (/^\*\*/.test(line.trim())) return { type: 'header', raw: line };
+    if (/^[•\-*]\s/.test(line.trim()) || /^\d+\.\s/.test(line.trim())) return { type: 'bullet', raw: line };
+    return { type: 'text', raw: line };
+  });
+}
+
+/**
+ * Builds Block Kit section blocks from classified lines.
+ * Flushes on spacer or new header.
+ */
+function buildBlocks(lines, rtl) {
+  const blocks = [];
+  let current = [];
+
+  function flush() {
+    if (current.length === 0) return;
+    const content = current.join('\n').trim();
+    if (content) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: rtl ? '‏' + content : content } });
+    }
+    current = [];
+  }
+
+  for (const line of lines) {
+    if (line.type === 'spacer') {
+      flush();
+    } else if (line.type === 'header' && current.length > 0) {
+      flush();
+      current.push(wrapLine(line.raw));
+    } else {
+      current.push(wrapLine(line.raw));
+    }
+  }
+  flush();
+  return blocks;
+}
+
+/**
+ * Splits any section block whose text exceeds 3000 chars.
+ */
+function chunkBlocks(blocks) {
+  const result = [];
+  for (const block of blocks) {
+    if (block.type !== 'section' || block.text.text.length <= 3000) {
+      result.push(block);
+      continue;
+    }
+    const rtlPrefix = block.text.text.startsWith('‏');
+    const raw = rtlPrefix ? block.text.text.slice(1) : block.text.text;
+    let remaining = raw;
+    while (remaining.length > 3000) {
+      const cutAt = remaining.lastIndexOf('\n', 3000) || 3000;
+      const chunk = remaining.slice(0, cutAt).trim();
+      result.push({ type: 'section', text: { type: 'mrkdwn', text: rtlPrefix ? '‏' + chunk : chunk } });
+      remaining = remaining.slice(cutAt).trimStart();
+    }
+    if (remaining) result.push({ type: 'section', text: { type: 'mrkdwn', text: rtlPrefix ? '‏' + remaining : remaining } });
+  }
+  return result;
+}
+
+/**
+ * Injects auto-links into text:
+ * - Jira ticket IDs (PROJ-123) → link to Jira browse URL
+ * - Word "Mixpanel" → link to Mixpanel project dashboard
+ * workspace must have jira_cloud_url and/or mixpanel_project_id set.
+ */
+export function injectLinks(text, workspace) {
+  if (!workspace) return text;
+  const jiraBase = workspace.jira_cloud_url;
+  if (jiraBase) {
+    text = text.replace(/\b([A-Z][A-Z0-9]+-\d+)\b/g, (_, key) => `<${jiraBase}/browse/${key}|${key}>`);
+  }
+  const mixpanelProject = workspace.mixpanel_project_id;
+  if (mixpanelProject) {
+    const mixpanelUrl = `https://mixpanel.com/project/${mixpanelProject}`;
+    text = text.replace(/\bMixpanel\b/g, `<${mixpanelUrl}|Mixpanel>`);
+  }
+  return text;
 }
 
 /**
@@ -57,23 +157,12 @@ function cleanResponseText(text) {
 }
 
 export function formatResponse(text) {
-  const blocks = [];
   const cleaned = cleanResponseText(text);
   const rtl = isRTL(cleaned);
-  const chunks = chunkText(formatForSlack(cleaned));
-
-  for (const chunk of chunks) {
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        // Prepend RLM (U+200F) so Slack renders the block right-to-left
-        text: rtl ? '\u200F' + chunk : chunk,
-      },
-    });
-  }
-
-  return blocks;
+  const slackText = formatForSlack(cleaned);
+  const lines = parseSections(slackText);
+  const blocks = buildBlocks(lines, rtl);
+  return chunkBlocks(blocks);
 }
 
 export function formatConnectPrompt(integration) {
@@ -299,10 +388,8 @@ export async function formatResponseSmart(text) {
   const id = await storeReadMore(cleanedRest);
   const rtl = isRTL(cleanedSummary);
 
-  const blocks = chunkText(formatForSlack(cleanedSummary)).map(chunk => ({
-    type: 'section',
-    text: { type: 'mrkdwn', text: rtl ? '\u200F' + chunk : chunk },
-  }));
+  const slackText = formatForSlack(cleanedSummary);
+  const blocks = chunkBlocks(buildBlocks(parseSections(slackText), rtl));
 
   blocks.push({
     type: 'actions',

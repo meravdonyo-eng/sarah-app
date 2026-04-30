@@ -60,6 +60,16 @@ export async function initDb() {
     );
 
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_default_project TEXT;
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_cloud_url TEXT;
+
+    CREATE TABLE IF NOT EXISTS api_usage (
+      workspace_id  TEXT NOT NULL,
+      month         TEXT NOT NULL,            -- 'YYYY-MM'
+      input_tokens  BIGINT NOT NULL DEFAULT 0,
+      output_tokens BIGINT NOT NULL DEFAULT 0,
+      cost_usd      NUMERIC(10,6) NOT NULL DEFAULT 0,
+      PRIMARY KEY (workspace_id, month)
+    );
   `);
 
   console.log('DB initialized');
@@ -100,16 +110,17 @@ export async function updateWorkspaceMixpanel(workspaceId, { projectId, username
   );
 }
 
-export async function updateWorkspaceJira(workspaceId, { accessToken, refreshToken, cloudId, expiresAt }) {
+export async function updateWorkspaceJira(workspaceId, { accessToken, refreshToken, cloudId, expiresAt, cloudUrl }) {
   await pool.query(
     `UPDATE workspaces
      SET jira_access_token  = $2,
          jira_refresh_token = $3,
          jira_cloud_id      = $4,
          jira_expires_at    = $5,
+         jira_cloud_url     = COALESCE($6, jira_cloud_url),
          updated_at         = NOW()
      WHERE workspace_id = $1`,
-    [workspaceId, accessToken, refreshToken, cloudId, expiresAt]
+    [workspaceId, accessToken, refreshToken, cloudId, expiresAt, cloudUrl || null]
   );
 }
 
@@ -228,6 +239,48 @@ export async function dbPopReadMore(id) {
   const found = rows[0]?.content ?? null;
   console.log(`[ReadMore] Pop result for id=${id}: ${found ? `found (len=${found.length})` : 'NOT FOUND'}`);
   return found;
+}
+
+// All workspaces — for token refresh daemon
+export async function getAllWorkspaces() {
+  const { rows } = await pool.query('SELECT * FROM workspaces');
+  return rows;
+}
+
+// Per-tenant API cost tracking
+export async function incrementApiUsage(workspaceId, inputTokens, outputTokens) {
+  const month   = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+  // Claude Sonnet 4 pricing: $3/M input, $15/M output
+  const cost    = (inputTokens * 0.000003) + (outputTokens * 0.000015);
+  await pool.query(
+    `INSERT INTO api_usage (workspace_id, month, input_tokens, output_tokens, cost_usd)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (workspace_id, month) DO UPDATE
+       SET input_tokens  = api_usage.input_tokens  + EXCLUDED.input_tokens,
+           output_tokens = api_usage.output_tokens + EXCLUDED.output_tokens,
+           cost_usd      = api_usage.cost_usd      + EXCLUDED.cost_usd`,
+    [workspaceId, month, inputTokens, outputTokens, cost]
+  );
+  return cost;
+}
+
+export async function getMonthlyUsage(workspaceId) {
+  const month = new Date().toISOString().slice(0, 7);
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(cost_usd), 0) AS total FROM api_usage
+     WHERE workspace_id = $1 AND month = $2`,
+    [workspaceId, month]
+  );
+  return parseFloat(rows[0]?.total || '0');
+}
+
+export async function getTotalMonthlyUsage() {
+  const month = new Date().toISOString().slice(0, 7);
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(cost_usd), 0) AS total FROM api_usage WHERE month = $1`,
+    [month]
+  );
+  return parseFloat(rows[0]?.total || '0');
 }
 
 export default pool;

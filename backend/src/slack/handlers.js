@@ -9,7 +9,19 @@ import {
   getUserFlag,
   setUserFlag,
   clearJiraToken,
+  incrementApiUsage,
+  getMonthlyUsage,
+  getTotalMonthlyUsage,
 } from '../services/db.js';
+import { sendOwnerAlert, checkApibudget } from '../services/ownerAlerts.js';
+import {
+  trackActivated,
+  trackErrorShown,
+  trackOnboardingStarted,
+  trackOnboardingStepCompleted,
+  trackOnboardingCompleted,
+  trackJiraConnected,
+} from '../services/sarahAnalytics.js';
 import { getCachedSnapshot, setCachedSnapshot } from '../services/snapshotCache.js';
 import { generateSnapshot } from '../services/snapshot.js';
 import { encrypt } from '../services/encryption.js';
@@ -22,6 +34,7 @@ import {
   formatThinking,
   formatWelcome,
   formatFirstConnection,
+  injectLinks,
 } from './formatter.js';
 import { popReadMore } from './readMoreStore.js';
 import { executeMixpanelTool } from '../services/mixpanel.js';
@@ -35,6 +48,31 @@ const mixpanelSetupState = new Map(); // slackUserId -> { step, projectId, usern
 // Tracks in-progress Claude requests so they can be cancelled
 const activeRequests = new Map(); // slackUserId -> { abortController, channelId, thinkingTs }
 
+// Bug 1 — Idempotency: prevent processing the same Slack event twice
+// (Slack retries if it doesn't get a 200 within 3s; Bolt ACKs immediately but events can
+//  still arrive twice in edge cases or when the handler errors mid-flight)
+const processedEvents = new Map(); // event_ts -> timestamp
+const EVENT_DEDUP_TTL = 60_000; // 60 seconds
+function isDuplicate(eventTs) {
+  if (processedEvents.has(eventTs)) return true;
+  processedEvents.set(eventTs, Date.now());
+  // Prune old entries to avoid memory leak
+  for (const [key, ts] of processedEvents) {
+    if (Date.now() - ts > EVENT_DEDUP_TTL) processedEvents.delete(key);
+  }
+  return false;
+}
+
+// Bug 2 — Message queue per-user: prevent race conditions when a user sends
+// two messages before the first reply arrives (replies would interleave)
+const userQueues = new Map(); // userId -> Promise
+function enqueueForUser(userId, fn) {
+  const prev = userQueues.get(userId) || Promise.resolve();
+  const next = prev.then(fn).catch(() => {});
+  userQueues.set(userId, next);
+  return next;
+}
+
 const GREETING_PATTERN = /^(hi|hey|hello|shalom|שלום|היי|הי|בוקר טוב|צהריים טובים|ערב טוב|מה נשמע|מה קורה|yo|sup)[\s!?.]*$/i;
 const STATUS_PATTERN = /^(status|סטטוס|integrations|חיבורים)[\s!?.]*$/i;
 
@@ -45,6 +83,30 @@ export async function handleMessage({ message, say, client, context }) {
   const text = (message.text || '').trim();
 
   if (!text || message.bot_id) return;
+
+  // Bug 1 — Idempotency: skip if we already processed this exact event
+  const eventTs = message.event_ts || message.ts;
+  if (eventTs && isDuplicate(eventTs)) {
+    console.log(`[Idempotency] Skipping duplicate event_ts=${eventTs}`);
+    return;
+  }
+
+  // Feature — Public Channel Block: only respond in DMs and private channels
+  try {
+    const channelInfo = await client.conversations.info({ channel: channelId });
+    const ch = channelInfo.channel;
+    const isPrivate = ch.is_im || ch.is_mpim || ch.is_private;
+    if (!isPrivate) {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: message.ts,
+        text: 'אני עובדת רק ב-DM או בערוצים פרטיים כדי להגן על הדאטה של החברה. שלחי לי הודעה ישירה 🔒',
+      });
+      return;
+    }
+  } catch {
+    // If we can't check channel type (e.g. missing scope), proceed normally
+  }
 
   const workspace = await getWorkspace(workspaceId);
   if (!workspace) {
@@ -84,7 +146,7 @@ export async function handleMessage({ message, say, client, context }) {
       await say({ text: 'Mixpanel is already connected ✅\nTo switch to a different project, type *reconnect mixpanel*.' });
       return;
     }
-    await startMixpanelStep1(userId, say);
+    await startMixpanelStep1(userId, say, workspaceId);
     return;
   }
 
@@ -108,6 +170,16 @@ export async function handleMessage({ message, say, client, context }) {
   }
 
   // --- Regular message → Claude ---
+  // Bug 0 — Check API budget before calling Claude
+  try {
+    const totalSpend = await getTotalMonthlyUsage();
+    const budgetExceeded = await checkApibudget(totalSpend);
+    if (budgetExceeded) {
+      await say({ text: 'Sarah חוזרת עוד כמה שעות. נסי שוב מאוחר יותר 🙏' });
+      return;
+    }
+  } catch { /* budget check must never block the user */ }
+
   const isComplex = detectJiraMandate(text) || detectBaselineQuery(text) || detectFunnelQuestion(text);
   const thinkingMsg = await say({
     blocks: formatThinking(isComplex),
@@ -117,18 +189,57 @@ export async function handleMessage({ message, say, client, context }) {
   const abortController = new AbortController();
   activeRequests.set(userId, { abortController, channelId, thinkingTs: thinkingMsg.ts });
 
+  // Bug 2 — Enqueue this request so parallel messages from the same user run in order
+  await enqueueForUser(userId, async () => {
   try {
     const history = await getConversationHistory(workspaceId, userId, channelId);
     const result = await sendMessageWithTools(workspace, text, history, abortController.signal);
     activeRequests.delete(userId);
     await saveConversationHistory(workspaceId, userId, channelId, result.conversationHistory);
 
+    // Per-tenant cost tracking
+    if (result.usage) {
+      const { input_tokens, output_tokens } = result.usage;
+      try {
+        const callCost = await incrementApiUsage(workspaceId, input_tokens || 0, output_tokens || 0);
+        const monthTotal = await getMonthlyUsage(workspaceId);
+        const TENANT_ALERT = 5.00;
+        if (monthTotal > TENANT_ALERT) {
+          sendOwnerAlert({
+            subject: `High usage: workspace ${workspaceId}`,
+            body: `Monthly: $${monthTotal.toFixed(2)}. Last call: $${callCost.toFixed(4)}.`,
+            channels: ['slack_dm'],
+          }).catch(() => {});
+        }
+      } catch { /* cost tracking must never block the user */ }
+    }
+
+    const linkedResponse = injectLinks(result.response, workspace);
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,
-      blocks: await formatResponseSmart(result.response),
-      text: result.response,
+      blocks: await formatResponseSmart(linkedResponse),
+      text: linkedResponse,
     });
+
+    // Gap 2 — Activated: fire once per user on their first successful data answer
+    if (result.response && !result.jiraAuthFailed) {
+      const alreadyActivated = await getUserFlag(workspaceId, userId, 'activated');
+      if (!alreadyActivated) {
+        await setUserFlag(workspaceId, userId, 'activated');
+        // Detect which feature (tool) Claude used to answer
+        const toolsUsed = result.conversationHistory
+          .flatMap(m => Array.isArray(m.content) ? m.content : [])
+          .filter(b => b.type === 'tool_use')
+          .map(b => b.name);
+        const featureName = toolsUsed.includes('mixpanel_funnel')    ? 'funnel'
+                          : toolsUsed.includes('mixpanel_retention') ? 'retention'
+                          : toolsUsed.some(n => n.startsWith('jira_')) ? 'jira'
+                          : toolsUsed.some(n => n.startsWith('mixpanel_')) ? 'mixpanel'
+                          : null;
+        trackActivated(workspaceId, userId, { feature_name: featureName }).catch(() => {});
+      }
+    }
 
     // Jira token expired/revoked mid-conversation → clear from DB + show reconnect
     if (result.jiraAuthFailed) {
@@ -166,6 +277,12 @@ export async function handleMessage({ message, say, client, context }) {
       return;
     }
     console.error('Claude error:', err);
+    // Gap 2+4 — Error Shown: track every time Sarah fails to answer
+    trackErrorShown(workspaceId, userId, {
+      error_code:    err.status || err.code || null,
+      error_message: err.message || String(err),
+      error_screen:  'chat',
+    }).catch(() => {});
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,
@@ -173,6 +290,7 @@ export async function handleMessage({ message, say, client, context }) {
       text: 'Error',
     });
   }
+  }); // end enqueueForUser
 }
 
 export async function handleAppMention({ event, say, client, context }) {
@@ -186,8 +304,10 @@ export async function handleAppMention({ event, say, client, context }) {
   });
 }
 
-async function startMixpanelStep1(userId, say) {
-  mixpanelSetupState.set(userId, { step: 'project_id' });
+async function startMixpanelStep1(userId, say, workspaceId) {
+  mixpanelSetupState.set(userId, { step: 'project_id', workspaceId });
+  // Gap 3 — Onboarding Started
+  trackOnboardingStarted(workspaceId, userId).catch(() => {});
   await say({
     blocks: [
       {
@@ -246,6 +366,8 @@ async function handleMixpanelSetupStep({ userId, workspaceId, text, say }) {
   if (state.step === 'project_id') {
     const projectId = stripLabel(text, 'project id', 'project_id', 'projectid');
     mixpanelSetupState.set(userId, { ...state, step: 'username', projectId });
+    // Gap 3 — Onboarding Step 1 completed
+    trackOnboardingStepCompleted(workspaceId, userId, 1, 'project_id').catch(() => {});
     await say({
       blocks: [
         {
@@ -270,6 +392,8 @@ async function handleMixpanelSetupStep({ userId, workspaceId, text, say }) {
   if (state.step === 'username') {
     const username = stripLabel(text, 'username', 'user name', 'service account username');
     mixpanelSetupState.set(userId, { ...state, step: 'secret', username });
+    // Gap 3 — Onboarding Step 2 completed
+    trackOnboardingStepCompleted(workspaceId, userId, 2, 'username').catch(() => {});
     await say({
       blocks: [
         {
@@ -291,6 +415,8 @@ async function handleMixpanelSetupStep({ userId, workspaceId, text, say }) {
     const secret = stripLabel(text, 'secret', 'service account secret', 'password');
     const { projectId, username } = state;
     mixpanelSetupState.set(userId, { step: 'confirm', projectId, username, secret, workspaceId });
+    // Gap 3 — Onboarding Step 3 completed
+    trackOnboardingStepCompleted(workspaceId, userId, 3, 'secret').catch(() => {});
     await say({ blocks: formatMixpanelConfirm(projectId, username) });
   }
 }
@@ -399,20 +525,22 @@ export async function handleAction({ action, ack, say, body, context, client }) 
       await say({ text: ':hourglass: This content has expired — please ask again.' });
       return;
     }
-    // Remove the "Read more" button from the original message
+    // Bug 3 fix — expand content INSIDE the same message (not as a new message below)
+    // Strip the "Read more" button block, then append the expanded blocks to the original
     const channelId = body.channel?.id || body.container?.channel_id;
     const summaryBlocks = (body.message?.blocks || []).filter(b => b.type !== 'actions');
+    const restBlocks = formatResponse(rest);
+    const fullBlocks = [...summaryBlocks, ...restBlocks];
+    const fullText = summaryBlocks.map(b => b.text?.text || '').join(' ').trim() + '\n' + rest;
+
     if (client && channelId && body.message?.ts) {
-      const summaryText = summaryBlocks.map(b => b.text?.text || '').join(' ').trim() || '...';
       await client.chat.update({
         channel: channelId,
         ts: body.message.ts,
-        blocks: summaryBlocks,
-        text: summaryText,
+        blocks: fullBlocks,
+        text: fullText.slice(0, 200),
       });
     }
-    // Post the rest as a new message
-    await say({ blocks: formatResponse(rest), text: rest.slice(0, 200) });
     return;
   }
 
@@ -438,6 +566,8 @@ export async function handleAction({ action, ack, say, body, context, client }) 
         secret: encrypt(secret),
       });
       mixpanelSetupState.delete(userId);
+      // Gap 3 — Onboarding Completed (Mixpanel fully connected)
+      trackOnboardingCompleted(workspaceId, userId).catch(() => {});
 
       const jiraUrl = JIRA_AUTH_URL(workspaceId);
       await say({
@@ -491,7 +621,7 @@ export async function handleAction({ action, ack, say, body, context, client }) 
       await say({ text: 'Mixpanel is already connected ✅' });
       return;
     }
-    await startMixpanelStep1(userId, say);
+    await startMixpanelStep1(userId, say, workspaceId);
     return;
   }
 

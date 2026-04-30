@@ -8,6 +8,7 @@ const { App, ExpressReceiver } = pkg;
 import { initDb, getWorkspace } from './services/db.js';
 import { decrypt } from './services/encryption.js';
 import { handleMessage, handleAppMention, handleAction, handleAppHomeOpened } from './slack/handlers.js';
+import { startTokenRefreshDaemon } from './services/ownerAlerts.js';
 import oauthRouter from './routes/oauth.js';
 import agentRouter from './routes/agent.js';
 import slackRouter from './routes/slack.js';
@@ -103,6 +104,9 @@ async function start() {
   await slackApp.start(PORT);
   console.log(`Sarah running on port ${PORT}`);
   console.log(`Slack events: http://localhost:${PORT}/slack/events`);
+
+  // Alert C — OAuth token refresh daemon (runs every 4h)
+  startTokenRefreshDaemon();
 }
 
 start().catch((err) => {

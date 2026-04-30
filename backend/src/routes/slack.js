@@ -6,6 +6,7 @@ import express from 'express';
 import axios from 'axios';
 import { upsertWorkspace } from '../services/db.js';
 import { encrypt } from '../services/encryption.js';
+import { trackSignUpCompleted, setWorkspaceRevenue } from '../services/sarahAnalytics.js';
 
 const router = express.Router();
 
@@ -21,18 +22,30 @@ const SCOPES = [
 ].join(',');
 
 // GET /api/slack/install — redirect to Slack OAuth consent screen
+// Accepts UTM params from the landing page and encodes them in `state`
+// so they survive the OAuth redirect and can be attached to Sign Up Completed.
 router.get('/install', (req, res) => {
+  // Capture UTM params passed from the landing page (e.g. ?utm_source=google)
+  const utmKeys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'referrer', 'landing_page'];
+  const utmData = {};
+  utmKeys.forEach(key => { if (req.query[key]) utmData[key] = req.query[key]; });
+
+  const state = Object.keys(utmData).length > 0
+    ? Buffer.from(JSON.stringify(utmData)).toString('base64')
+    : '';
+
   const params = new URLSearchParams({
     client_id: process.env.SLACK_CLIENT_ID,
     scope: SCOPES,
     redirect_uri: `${process.env.BACKEND_URL}/api/slack/callback`,
+    ...(state ? { state } : {}),
   });
   res.redirect(`${SLACK_AUTHORIZE_URL}?${params}`);
 });
 
 // GET /api/slack/callback — Slack redirects here after workspace approves
 router.get('/callback', async (req, res) => {
-  const { code, error } = req.query;
+  const { code, error, state } = req.query;
 
   if (error) {
     return res.send(html('Installation Cancelled', '<p>Sarah לא הותקנה. ניתן לנסות שוב.</p>'));
@@ -75,6 +88,16 @@ router.get('/callback', async (req, res) => {
     });
 
     console.log('✅ Workspace installed:', workspaceId);
+
+    // Decode UTM params that were passed through OAuth state
+    let utmProps = {};
+    if (state) {
+      try { utmProps = JSON.parse(Buffer.from(state, 'base64').toString('utf8')); } catch {}
+    }
+
+    // Gap 1 — Sign Up Completed + Gap 5 — set initial revenue profile
+    trackSignUpCompleted(workspaceId, teamName, utmProps).catch(() => {});
+    setWorkspaceRevenue(workspaceId, 'free').catch(() => {});
 
     res.send(html(
       'Sarah מותקנת!',

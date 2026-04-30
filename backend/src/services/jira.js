@@ -74,7 +74,9 @@ export async function exchangeJiraCode(code, workspaceId) {
   const resourcesRes = await axios.get(ATLASSIAN_RESOURCES_URL, {
     headers: { Authorization: `Bearer ${access_token}` },
   });
-  const cloudId = resourcesRes.data[0]?.id;
+  const resource = resourcesRes.data[0];
+  const cloudId  = resource?.id;
+  const cloudUrl = resource?.url || null; // e.g. "https://acme.atlassian.net"
   if (!cloudId) throw new Error('No Jira cloud resource found');
 
   await updateWorkspaceJira(workspaceId, {
@@ -82,6 +84,7 @@ export async function exchangeJiraCode(code, workspaceId) {
     refreshToken: encrypt(refresh_token),
     cloudId,
     expiresAt,
+    cloudUrl,
   });
 
   return { cloudId };

@@ -148,7 +148,12 @@ export function resetMonthlyAlerts() {
 // ---------------------------------------------------------------------------
 
 import { getAllWorkspaces } from './db.js';
-import { decrypt, encrypt } from './encryption.js';
+import { decrypt } from './encryption.js';
+
+// Fix 1 — dedup: only alert once per workspace per 7 days
+// (cleared on successful refresh so a new failure will alert again)
+const failureAlerted = new Map(); // workspaceId → timestamp of last alert sent
+const ALERT_DEDUP_MS = 7 * 24 * 60 * 60 * 1000;
 
 let refreshDaemonStarted = false;
 
@@ -170,22 +175,31 @@ export function startTokenRefreshDaemon() {
         try {
           // Dynamic import to avoid circular dependency
           const { refreshJiraToken } = await import('./jira.js');
-          const refreshed = await refreshJiraToken({
+          await refreshJiraToken({
             refreshToken: decrypt(ws.jira_refresh_token),
             workspaceId: ws.workspace_id,
           });
+          // Fix 3 — removed `_ = refreshed` (token is saved inside refreshJiraToken)
           console.log(`[TokenDaemon] Refreshed Jira token for workspace ${ws.workspace_id}`);
-          _ = refreshed; // token saved inside refreshJiraToken
+          // Clear dedup flag so a future failure will alert again
+          failureAlerted.delete(ws.workspace_id);
         } catch (err) {
           console.error(`[TokenDaemon] Refresh failed for ${ws.workspace_id}:`, err.message);
+
+          // Fix 1 — only alert once per workspace; skip if already alerted recently
+          const lastAlerted = failureAlerted.get(ws.workspace_id);
+          if (lastAlerted && now - lastAlerted < ALERT_DEDUP_MS) continue;
+          failureAlerted.set(ws.workspace_id, now);
+
           sendOwnerAlert({
             subject: `OAuth refresh failed: workspace ${ws.workspace_id}`,
-            body: `Tool: Jira. Error: ${err.message}\nUser may need to reconnect.`,
+            body: `Tool: Jira. Error: ${err.message}\nUser will be prompted to reconnect next time they message Sarah.`,
             channels: ['slack_dm'],
           }).catch(() => {});
 
-          // DM the affected workspace's users — best-effort
-          notifyWorkspaceJiraExpired(ws.workspace_id).catch(() => {});
+          // Fix 2 — NO user DM from daemon.
+          // Users are notified via handlers.js (jiraAuthFailed path) the next
+          // time they send a message — not proactively by the daemon.
         }
       }
     } catch (err) {
@@ -197,19 +211,4 @@ export function startTokenRefreshDaemon() {
   runRefresh();
   setInterval(runRefresh, 4 * 60 * 60 * 1000);
   console.log('[TokenDaemon] Started — runs every 4h');
-}
-
-async function notifyWorkspaceJiraExpired(workspaceId) {
-  // Notify via Slack — best effort, no throw
-  try {
-    const token = process.env.SLACK_BOT_TOKEN;
-    if (!token) return;
-
-    // We don't have per-user storage for who used Jira — post to owner for now
-    sendOwnerAlert({
-      subject: `Jira expired: workspace ${workspaceId}`,
-      body: 'Users in this workspace may need to reconnect Jira.',
-      channels: ['slack_dm'],
-    }).catch(() => {});
-  } catch {}
 }

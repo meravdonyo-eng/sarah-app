@@ -389,21 +389,9 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
   const dynamicHeader = buildDynamicHeader(workspace);
 
-  let basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
-  // Substitute all template placeholders in static prompt files
-  if (basePrompt.includes('{{')) {
-    const now = new Date();
-    const datetime = now.toISOString().replace('T', ' ').substring(0, 19);
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const dashboards = [];
-    if (workspace.mixpanel_project_id) dashboards.push('Mixpanel');
-    if (isJiraValid(workspace)) dashboards.push('Jira');
-    const availableStr = dashboards.join(', ') || 'None connected yet';
-    basePrompt = basePrompt
-      .replaceAll('{{CURRENT_DATETIME}}', datetime)
-      .replaceAll('{{TIMEZONE}}', timezone)
-      .replaceAll('{{AVAILABLE_DASHBOARDS}}', availableStr);
-  }
+  // Static prompt — no per-request substitutions so Anthropic cache always hits.
+  // Dynamic values (datetime, dashboards, events) are in dynamicHeader / discoveryContext.
+  const basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
 
   const messageAddons = buildMessageAddons(userMessage);
 
@@ -478,7 +466,13 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }
   }
 
-  const systemPrompt = dynamicHeader + '\n\n' + basePrompt + messageAddons + discoveryContext;
+  // Split system prompt into static (cached) + dynamic (fresh each request).
+  // The static block never changes between requests → Anthropic cache hits consistently
+  // → cached tokens have a separate rate-limit bucket, dramatically reducing 429s.
+  // The dynamic block contains date, events, funnels — must be fresh every call.
+  const staticSystemText = basePrompt; // ~7k tokens, file content never changes at runtime
+  const dynamicSystemText = [dynamicHeader, messageAddons, discoveryContext]
+    .filter(Boolean).join('\n\n');
 
   const sanitizedHistory = sanitizeHistory(conversationHistory);
   // Track where current-turn messages start (after history + current user msg)
@@ -495,8 +489,12 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     system: [
       {
         type: 'text',
-        text: systemPrompt,
-        cache_control: { type: 'ephemeral' }, // prompt caching
+        text: staticSystemText,
+        cache_control: { type: 'ephemeral' }, // ~7k tokens — cached, same every request
+      },
+      {
+        type: 'text',
+        text: dynamicSystemText, // date, dashboards, events, funnels — fresh each request
       },
     ],
     messages,

@@ -285,7 +285,9 @@ export async function handleMessage({ message, say, client, context }) {
     }).catch(() => {});
     const userMsg = err.status === 429
       ? 'Sarah is handling too many requests right now — please try again in a minute 🙏'
-      : 'Something went wrong. Please try again.';
+      : err.message === 'TIMEOUT'
+        ? 'Sarah took too long to respond — please try again 🙏'
+        : 'Something went wrong. Please try again.';
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,

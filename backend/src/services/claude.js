@@ -510,14 +510,14 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }));
   }
 
-  // Retry + 30s timeout wrapper — Bug 7
+  // Retry + timeout wrapper
   async function createWithRetry(opts, retries = 2) {
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         return await Promise.race([
           anthropic.messages.create(opts, signal ? { signal } : undefined),
           new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('TIMEOUT')), 30_000)
+            setTimeout(() => reject(new Error('TIMEOUT')), 90_000) // 90s — large prompts need time
           ),
         ]);
       } catch (err) {

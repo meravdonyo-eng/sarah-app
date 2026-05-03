@@ -250,9 +250,27 @@ async function executeTool(toolName, args, workspace) {
  * Strips leading messages until history starts with a clean user message.
  */
 function sanitizeHistory(history) {
+  // Truncate tool_result content in history to reduce input tokens.
+  // Full Mixpanel/Jira API responses can be 3000-8000 tokens each; historical
+  // context only needs the key numbers Claude already referenced in its reply.
+  const TOOL_RESULT_MAX = 800;
+  const compacted = history.map(msg => {
+    if (!Array.isArray(msg.content)) return msg;
+    if (!msg.content.some(c => c.type === 'tool_result')) return msg;
+    return {
+      ...msg,
+      content: msg.content.map(c => {
+        if (c.type !== 'tool_result') return c;
+        const text = typeof c.content === 'string' ? c.content : JSON.stringify(c.content ?? '');
+        if (text.length <= TOOL_RESULT_MAX) return c;
+        return { ...c, content: text.slice(0, TOOL_RESULT_MAX) + '…[truncated]' };
+      }),
+    };
+  });
+
   let start = 0;
-  while (start < history.length) {
-    const msg = history[start];
+  while (start < compacted.length) {
+    const msg = compacted[start];
     // Must start with a user message
     if (msg.role !== 'user') { start++; continue; }
     // User message must not begin with tool_result (orphaned from a trimmed tool_use)
@@ -260,7 +278,7 @@ function sanitizeHistory(history) {
     if (content.some(c => c.type === 'tool_result')) { start++; continue; }
     break;
   }
-  return history.slice(start);
+  return compacted.slice(start);
 }
 
 // --- Funnel Mandate: step-to-step conversion questions must use mixpanel_funnel ---

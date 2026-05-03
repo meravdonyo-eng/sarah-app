@@ -149,8 +149,10 @@ export async function getConversationHistory(workspaceId, slackUserId, channelId
 }
 
 export async function saveConversationHistory(workspaceId, slackUserId, channelId, history) {
-  // Keep only last 20 messages to limit token usage
-  const trimmed = history.slice(-20);
+  // Keep only last 10 messages to limit token usage.
+  // Tool result messages from Mixpanel/Jira can be 3000-8000 tokens each;
+  // 20 messages was regularly causing 429 rate-limit errors.
+  const trimmed = history.slice(-10);
   await pool.query(
     `INSERT INTO conversations (workspace_id, slack_user_id, channel_id, history)
      VALUES ($1, $2, $3, $4)

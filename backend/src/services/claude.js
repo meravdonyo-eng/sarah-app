@@ -419,11 +419,17 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         Array.isArray(funnels) ? funnels : [],
         workspace
       );
-      const funnelResultsStr = prefetchedFunnels.length > 0
+      // Cap funnel results at 6000 chars to keep system prompt within token budget.
+      // Raw JSON per funnel can be 2000-5000 chars × many funnels = rate-limit territory.
+      const MAX_FUNNEL_CHARS = 6000;
+      const rawFunnelResults = prefetchedFunnels.length > 0
         ? prefetchedFunnels.map(f =>
             `Funnel "${f._funnel_name}" (${f._period}):\n${JSON.stringify(f)}`
           ).join('\n\n')
         : '';
+      const funnelResultsStr = rawFunnelResults.length > MAX_FUNNEL_CHARS
+        ? rawFunnelResults.slice(0, MAX_FUNNEL_CHARS) + '\n...[truncated for token budget]'
+        : rawFunnelResults;
 
       discoveryContext = [
         '\n\n--- PRE-LOADED MIXPANEL DATA (last 30 days) ---',
@@ -497,7 +503,9 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
           ),
         ]);
       } catch (err) {
-        if (err.message === 'TIMEOUT' || err.name === 'AbortError') throw err; // no retry on abort
+        if (err.message === 'TIMEOUT' || err.name === 'AbortError') throw err;
+        // 429 rate-limit: retrying immediately is futile (resets in ~60s), throw right away
+        if (err.status === 429) throw err;
         if (attempt === retries) throw err;
         console.warn(`[ClaudeRetry] attempt ${attempt} failed: ${err.message} — retrying...`);
         await new Promise(r => setTimeout(r, 1000 * attempt));

@@ -283,11 +283,14 @@ export async function handleMessage({ message, say, client, context }) {
       error_message: err.message || String(err),
       error_screen:  'chat',
     }).catch(() => {});
+    const userMsg = err.status === 429
+      ? 'Sarah is handling too many requests right now — please try again in a minute 🙏'
+      : 'Something went wrong. Please try again.';
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,
-      blocks: formatError('Something went wrong. Please try again.'),
-      text: 'Error',
+      blocks: formatError(userMsg),
+      text: userMsg,
     });
   }
   }); // end enqueueForUser

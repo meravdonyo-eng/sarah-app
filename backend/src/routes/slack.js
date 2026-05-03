@@ -100,9 +100,9 @@ router.get('/callback', async (req, res) => {
     setWorkspaceRevenue(workspaceId, 'free').catch(() => {});
 
     res.send(html(
-      'Sarah מותקנת!',
-      `<p>✅ Sarah נוספה לworkspace <strong>${teamName}</strong> בהצלחה!</p>
-       <p>פתחי Slack ושלחי הודעה ל-Sarah כדי להתחיל.</p>`
+      'Sarah installed!',
+      `<p>✅ Sarah was successfully added to workspace <strong>${teamName}</strong></p>
+       <p>Open Slack and send Sarah a message to get started.</p>`
     ));
   } catch (err) {
     console.error('❌ Slack install error:', err.message);

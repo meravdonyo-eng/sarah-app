@@ -313,7 +313,14 @@ export async function handleMessage({ message, say, client, context }) {
       });
       return;
     }
-    console.error('Claude error:', err);
+    // Log every field that could identify the root cause
+    console.error('[SarahError] status=%s type=%s message=%s stack=%s',
+      err.status ?? err.statusCode ?? 'n/a',
+      err.error?.type ?? err.type ?? err.name ?? 'n/a',
+      err.message ?? String(err),
+      err.stack?.split('\n').slice(0, 3).join(' | ')
+    );
+    if (err.error) console.error('[SarahError] API error body:', JSON.stringify(err.error).slice(0, 500));
     // Gap 2+4 — Error Shown: track every time Sarah fails to answer
     trackErrorShown(workspaceId, userId, {
       error_code:    err.status || err.code || null,
@@ -324,7 +331,11 @@ export async function handleMessage({ message, say, client, context }) {
       ? 'Sarah is handling too many requests right now — please try again in a minute 🙏'
       : err.message === 'TIMEOUT'
         ? 'Sarah took too long to respond — please try again 🙏'
-        : 'Something went wrong. Please try again.';
+        : err.status === 401 || err.status === 403
+          ? 'Sarah can\'t reach the AI API right now — please contact support.'
+          : err.status >= 400 && err.status < 500
+            ? `Something went wrong (error ${err.status}). Please try again.`
+            : 'Something went wrong. Please try again.';
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,

@@ -327,15 +327,23 @@ export async function handleMessage({ message, say, client, context }) {
       error_message: err.message || String(err),
       error_screen:  'chat',
     }).catch(() => {});
-    const userMsg = err.status === 429
-      ? 'Sarah is handling too many requests right now — please try again in a minute 🙏'
-      : err.message === 'TIMEOUT'
-        ? 'Sarah took too long to respond — please try again 🙏'
-        : err.status === 401 || err.status === 403
-          ? 'Sarah can\'t reach the AI API right now — please contact support.'
-          : err.status >= 400 && err.status < 500
-            ? `Something went wrong (error ${err.status}). Please try again.`
-            : 'Something went wrong. Please try again.';
+    // Detect Anthropic "credit balance too low" — 400 with a billing-related message
+    const isBillingError = err.status === 400 &&
+      (err.error?.message?.toLowerCase().includes('credit') ||
+       err.error?.message?.toLowerCase().includes('billing') ||
+       err.message?.toLowerCase().includes('credit') ||
+       err.message?.toLowerCase().includes('billing'));
+    const userMsg = isBillingError
+      ? '⚠️ Sarah has run out of API credits. Please top up the Anthropic account to continue.'
+      : err.status === 429
+        ? 'Sarah is handling too many requests right now — please try again in a minute 🙏'
+        : err.message === 'TIMEOUT'
+          ? 'Sarah took too long to respond — please try again 🙏'
+          : err.status === 401 || err.status === 403
+            ? 'Sarah can\'t reach the AI API right now — please contact support.'
+            : err.status >= 400 && err.status < 500
+              ? `Something went wrong (error ${err.status}). Please try again.`
+              : 'Something went wrong. Please try again.';
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,

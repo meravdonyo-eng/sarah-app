@@ -184,15 +184,26 @@ export function injectLinks(text, workspace) {
   // Mixpanel project ID is encrypted in DB — decrypt before building URL
   const encryptedProjectId = workspace.mixpanel_project_id;
   if (encryptedProjectId) {
-    let projectId;
-    try { projectId = decrypt(encryptedProjectId); } catch { projectId = encryptedProjectId; }
-    const mixpanelUrl = `https://mixpanel.com/project/${projectId}`;
+    let projectId = null;
+    try {
+      projectId = decrypt(encryptedProjectId);
+      // Sanity check — a valid Mixpanel project ID is numeric (or at least short/printable).
+      // If decrypt silently returned garbage, the URL would be broken and hard to debug.
+      if (projectId) {
+        console.log(`[injectLinks] Mixpanel projectId decrypted OK: ${String(projectId).slice(0, 12)}${String(projectId).length > 12 ? '…' : ''}`);
+      }
+    } catch (err) {
+      console.error(`[injectLinks] Mixpanel decrypt FAILED — skipping [MIXPANEL_LINK] replacement. Error: ${err?.message ?? err}`);
+    }
 
-    // Replace [MIXPANEL_LINK] placeholder that Claude writes for explicit dashboard links.
-    // We do NOT use a broad /\bMixpanel\b/ replacement — if Claude writes a Slack URL like
-    // <url|Mixpanel> and the regex also matches the label "Mixpanel", it double-links and
-    // produces broken markup like <url|<url2|Mixpanel>>. Controlled placeholder only.
-    text = text.replace(/\[MIXPANEL_LINK\]/g, `<${mixpanelUrl}|Mixpanel dashboard>`);
+    if (projectId) {
+      const mixpanelUrl = `https://mixpanel.com/project/${projectId}`;
+      // Replace [MIXPANEL_LINK] placeholder that Claude writes for explicit dashboard links.
+      // We do NOT use a broad /\bMixpanel\b/ replacement — if Claude writes a Slack URL like
+      // <url|Mixpanel> and the regex also matches the label "Mixpanel", it double-links and
+      // produces broken markup like <url|<url2|Mixpanel>>. Controlled placeholder only.
+      text = text.replace(/\[MIXPANEL_LINK\]/g, `<${mixpanelUrl}|Mixpanel dashboard>`);
+    }
   }
 
   return text;

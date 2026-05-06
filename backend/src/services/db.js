@@ -61,6 +61,7 @@ export async function initDb() {
 
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_default_project TEXT;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_cloud_url TEXT;
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS event_dictionary JSONB;
 
     CREATE TABLE IF NOT EXISTS api_usage (
       workspace_id  TEXT NOT NULL,
@@ -243,10 +244,37 @@ export async function dbPopReadMore(id) {
   return found;
 }
 
+// Non-destructive read — used for Read more / Read less toggle (content stays until TTL)
+export async function dbGetReadMore(id) {
+  const { rows } = await pool.query(
+    `SELECT content FROM read_more_store WHERE id = $1 AND expires_at > NOW()`,
+    [id]
+  );
+  return rows[0]?.content ?? null;
+}
+
 // All workspaces — for token refresh daemon
 export async function getAllWorkspaces() {
   const { rows } = await pool.query('SELECT * FROM workspaces');
   return rows;
+}
+
+// Event Dictionary — per-workspace mapping of event names to human-readable descriptions
+export async function updateWorkspaceEventDictionary(workspaceId, dictionary) {
+  await pool.query(
+    `UPDATE workspaces SET event_dictionary = $2, updated_at = NOW() WHERE workspace_id = $1`,
+    [workspaceId, JSON.stringify(dictionary)]
+  );
+}
+
+export async function addEventToDictionary(workspaceId, eventName, description) {
+  await pool.query(
+    `UPDATE workspaces
+     SET event_dictionary = COALESCE(event_dictionary, '{}'::jsonb) || jsonb_build_object($2::text, $3::text),
+         updated_at = NOW()
+     WHERE workspace_id = $1`,
+    [workspaceId, eventName, description]
+  );
 }
 
 // Per-tenant API cost tracking

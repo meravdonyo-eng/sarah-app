@@ -6,6 +6,45 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// ---------------------------------------------------------------------------
+// Jira session health cache
+// Stores the last known Jira connectivity result per workspace.
+// Refreshed in the background every 5 minutes — never blocks the response.
+// ---------------------------------------------------------------------------
+const jiraHealthCache = new Map(); // workspaceId → { ok: boolean, ts: number }
+const JIRA_HEALTH_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCachedJiraHealth(workspaceId) {
+  const entry = jiraHealthCache.get(workspaceId);
+  if (!entry) return null; // no data yet
+  if (Date.now() - entry.ts > JIRA_HEALTH_TTL_MS) return null; // stale
+  return entry.ok;
+}
+
+function updateJiraHealthCache(workspaceId, ok) {
+  jiraHealthCache.set(workspaceId, { ok, ts: Date.now() });
+}
+
+async function probeJiraInBackground(workspace) {
+  // Run fire-and-forget — does not block session startup
+  setImmediate(async () => {
+    try {
+      await executeJiraTool('jira_search_issues', { jql: 'ORDER BY created DESC', max_results: 1 }, {
+        accessToken:  decrypt(workspace.jira_access_token),
+        refreshToken: decrypt(workspace.jira_refresh_token),
+        cloudId:      workspace.jira_cloud_id,
+        expiresAt:    workspace.jira_expires_at,
+        workspaceId:  workspace.workspace_id,
+      });
+      updateJiraHealthCache(workspace.workspace_id, true);
+      console.log(`[JiraHealth] ✅ OK — workspace ${workspace.workspace_id}`);
+    } catch (err) {
+      updateJiraHealthCache(workspace.workspace_id, false);
+      console.warn(`[JiraHealth] ❌ FAIL — workspace ${workspace.workspace_id}: ${err.message}`);
+    }
+  });
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const GLOBAL_PROMPT_PATH = path.join(__dirname, '../../prompts/system_prompt.txt');
@@ -345,9 +384,25 @@ function buildDynamicHeader(workspace) {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   const dashboards = [];
-  if (workspace.mixpanel_project_id) dashboards.push('Mixpanel (Funnel, Retention, Engagement, User Journey, Errors, Segments)');
-  if (isJiraValid(workspace)) dashboards.push('Jira (Issues, Projects, Bugs)');
+  let mixpanelProjectId = null;
+  if (workspace.mixpanel_project_id) {
+    try { mixpanelProjectId = decrypt(workspace.mixpanel_project_id); } catch { mixpanelProjectId = '?'; }
+    dashboards.push(`Mixpanel project ${mixpanelProjectId} (Funnel, Retention, Engagement, User Journey, Errors, Segments)`);
+    console.log(`[Session] Mixpanel project: ${mixpanelProjectId} | workspace: ${workspace.workspace_id}`);
+  }
+  const jiraConnected = isJiraValid(workspace);
+  if (jiraConnected) {
+    // Use live health cache result if available; default to "available" (credentials exist)
+    const jiraOk = getCachedJiraHealth(workspace.workspace_id);
+    const jiraStatus = jiraOk === false ? '⚠️ connected but not responding' : '✅ available';
+    dashboards.push(`Jira cloud ${workspace.jira_cloud_id} — ${jiraStatus} (Issues, Projects, Bugs)`);
+    console.log(`[Session] Jira cloudId: ${workspace.jira_cloud_id} | health=${jiraOk ?? 'unknown'} | workspace: ${workspace.workspace_id}`);
+  }
   const availableDashboards = dashboards.length > 0 ? dashboards.join(', ') : 'None connected yet';
+
+  const mixpanelLinkLine = workspace.mixpanel_project_id
+    ? 'Mixpanel link placeholder: when you want to provide a direct link to the Mixpanel project dashboard, write [MIXPANEL_LINK] in your response — the system will replace it with a clickable URL. Example: "View the full funnel at [MIXPANEL_LINK]".'
+    : '';
 
   const jiraProjectLine = workspace.jira_default_project
     ? `Default Jira project: ${workspace.jira_default_project} — always add "project = \\"${workspace.jira_default_project}\\"" to all JQL queries unless the user explicitly asks for a different project.`
@@ -358,16 +413,38 @@ function buildDynamicHeader(workspace) {
     `Timezone: ${timezone}`,
     `Connected dashboards: ${availableDashboards}`,
     `IMPORTANT: The above "Connected dashboards" list is the ground truth for this session. Ignore any prior conversation history that contradicts it.`,
+    mixpanelLinkLine,
     jiraProjectLine,
-    `DATA FRESHNESS RULE: NEVER say "I already answered this" and repeat a prior number. For ANY question about metrics, counts, or conversions — always make a fresh tool call. Numbers in conversation history may be wrong. If asked to recheck, call the tool again (do NOT re-add daily numbers already mentioned in history).`,
-    `FUNNEL RULE: For step-to-step conversion questions (how many users went from X to Y), ALWAYS use mixpanel_funnel — never count by adding segmentation values. Segmentation and funnel give different numbers because of the conversion window. The funnel number matches the Mixpanel dashboard exactly.`,
-    `MIXPANEL COUNTING RULE — MANDATORY: Every Mixpanel number you report must come from unique users, not total event occurrences.`,
-    `  • mixpanel_segmentation → only valid if type='unique' (default). type='general' counts total events — do not use for user counts.`,
-    `  • mixpanel_funnel → always counts unique users who completed all steps in sequence. Use for any conversion/step question.`,
-    `  • NEVER count users by summing raw event totals, daily values, or segmentation without type='unique'.`,
-    `  • After every Mixpanel query: confirm the tool used was funnel or unique segmentation before reporting.`,
-    `  • Always state the method explicitly: "X unique users (funnel)" or "X unique users (unique segmentation)".`,
+    // DATA FRESHNESS RULE, FUNNEL RULE, MIXPANEL COUNTING RULE removed from here —
+    // all three are now in the static system prompt (v3.9.13+) which is cached.
+    // Keeping them here would duplicate ~200 uncached tokens per request.
   ].filter(Boolean).join('\n');
+}
+
+/**
+ * Format a pre-fetched Mixpanel funnel result as a compact table instead of raw JSON.
+ * Reduces ~300 tokens/funnel → ~40 tokens/funnel while keeping all relevant numbers.
+ * Falls back to truncated JSON if the expected steps structure is missing.
+ */
+function formatFunnelAsTable(f) {
+  try {
+    // Mixpanel funnel API returns steps at f.data.steps (aggregated) or under a date key
+    const steps = f.data?.steps
+      ?? (f.data && typeof f.data === 'object' ? Object.values(f.data)[0]?.steps : null)
+      ?? null;
+    if (!steps || !Array.isArray(steps) || steps.length === 0) throw new Error('no steps');
+    return steps.map((s, i) => {
+      const label = s.step_label ?? s.event ?? `Step ${i + 1}`;
+      const count = typeof s.count === 'number' ? s.count.toLocaleString() : (s.unique_count ?? '?');
+      const stepPct = s.step_conv_ratio != null
+        ? ` (${(s.step_conv_ratio * 100).toFixed(1)}% step)` : '';
+      const overallPct = i > 0 && s.overall_conv_ratio != null
+        ? `, ${(s.overall_conv_ratio * 100).toFixed(1)}% overall` : '';
+      return `  Step ${i + 1} — ${label}: ${count} users${stepPct}${overallPct}`;
+    }).join('\n');
+  } catch {
+    return JSON.stringify(f).slice(0, 500) + '…';
+  }
 }
 
 export async function sendMessageWithTools(workspace, userMessage, conversationHistory = [], signal = null, options = {}) {
@@ -387,6 +464,11 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }
   }
 
+  // Trigger a background Jira health probe so the cache stays fresh.
+  // The probe is fire-and-forget — it never delays this response.
+  // Result lands in jiraHealthCache and is used by the NEXT call (or this one if cache already warm).
+  if (isJiraValid(workspace)) probeJiraInBackground(workspace);
+
   const dynamicHeader = buildDynamicHeader(workspace);
 
   // Static prompt — no per-request substitutions so Anthropic cache always hits.
@@ -399,7 +481,14 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   // This eliminates 2 mandatory Claude tool-call iterations (~8s) per question.
   let discoveryContext = '';
   const hasMixpanel = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
-  if (hasMixpanel) {
+  // Skip Mixpanel prefetch for pure Jira questions (ticket/bug lookups have no use for events/funnels).
+  // Saves ~3,000 tokens × N tool-loop iterations for questions like "show open P1 tickets".
+  // Keep prefetch if question also has funnel/conversion keywords — those need Mixpanel data.
+  const skipMixpanelPrefetch = detectJiraMandate(userMessage) && !detectFunnelQuestion(userMessage);
+  if (skipMixpanelPrefetch) {
+    console.log('[PrefetchSkip] Jira-only question — skipping Mixpanel discovery prefetch');
+  }
+  if (hasMixpanel && !skipMixpanelPrefetch) {
     try {
       const creds = {
         projectId: decrypt(workspace.mixpanel_project_id),
@@ -425,21 +514,37 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         Array.isArray(funnels) ? funnels : [],
         workspace
       );
-      // Cap funnel results at 6000 chars to keep system prompt within token budget.
-      // Raw JSON per funnel can be 2000-5000 chars × many funnels = rate-limit territory.
-      const MAX_FUNNEL_CHARS = 6000;
+      // Format funnel results as a compact table (~40 tokens/funnel vs ~300 tokens JSON).
+      // Still cap at 3000 chars as a safety net in case formatFunnelAsTable falls back to JSON.
+      const MAX_FUNNEL_CHARS = 3000;
       const rawFunnelResults = prefetchedFunnels.length > 0
         ? prefetchedFunnels.map(f =>
-            `Funnel "${f._funnel_name}" (${f._period}):\n${JSON.stringify(f)}`
+            `Funnel "${f._funnel_name}" (${f._period}):\n${formatFunnelAsTable(f)}`
           ).join('\n\n')
         : '';
       const funnelResultsStr = rawFunnelResults.length > MAX_FUNNEL_CHARS
         ? rawFunnelResults.slice(0, MAX_FUNNEL_CHARS) + '\n...[truncated for token budget]'
         : rawFunnelResults;
 
+      // Event Dictionary — PM-defined human-readable names for cryptic event keys.
+      // Stored per-workspace in DB. If present, inject before the raw event list so
+      // Claude can map e.g. "usr_onb_s1" → "Onboarding step 1 completed".
+      const eventDictionary = workspace.event_dictionary
+        ? (typeof workspace.event_dictionary === 'string'
+            ? JSON.parse(workspace.event_dictionary)
+            : workspace.event_dictionary)
+        : null;
+      const dictSection = eventDictionary && Object.keys(eventDictionary).length > 0
+        ? 'Event Dictionary (use to interpret cryptic event names):\n' +
+          Object.entries(eventDictionary)
+            .map(([k, v]) => `  '${k}' = ${v}`)
+            .join('\n')
+        : '';
+
       discoveryContext = [
         '\n\n--- PRE-LOADED MIXPANEL DATA (last 30 days) ---',
         projectTz ? `Project timezone: ${projectTz}` : '',
+        dictSection,
         '',
         'Available events:',
         eventsStr,
@@ -454,7 +559,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         '⚠️ CRITICAL INSTRUCTIONS:',
         '1. Do NOT call mixpanel_list_events, mixpanel_list_funnels — data is above.',
         funnelResultsStr
-          ? `2. PRE-LOADED DATA covers exactly: ${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} to ${new Date().toISOString().split('T')[0]} (last 30 days). Use unique_users from the steps array ONLY for questions about this period. Do NOT call mixpanel_funnel or mixpanel_segmentation for this period.`
+          ? `2. PRE-LOADED DATA covers exactly: ${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} to ${new Date().toISOString().split('T')[0]} (last 30 days). Use the user counts from the funnel table above ONLY for questions about this period. Do NOT call mixpanel_funnel or mixpanel_segmentation for this period.`
           : '2. For conversion/step questions, call mixpanel_funnel (never segmentation).',
         '3. DATE RANGE MISMATCH RULE: If user asks about a DIFFERENT time range (last week, last quarter, specific dates, etc.) — call mixpanel_funnel with those exact dates AND the events array (e.g. events=["Sign Up Started","Activated"]). Never use the pre-loaded 30-day data for a different period.',
         '4. AD-HOC FUNNELS: mixpanel_funnel accepts events=["Event A","Event B","Event C"] — no funnel_id needed. Use this for ANY conversion question, even if those events are not in a saved funnel.',
@@ -466,13 +571,35 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }
   }
 
-  // Split system prompt into static (cached) + dynamic (fresh each request).
-  // The static block never changes between requests → Anthropic cache hits consistently
-  // → cached tokens have a separate rate-limit bucket, dramatically reducing 429s.
-  // The dynamic block contains date, events, funnels — must be fresh every call.
-  const staticSystemText = basePrompt; // ~7k tokens, file content never changes at runtime
-  const dynamicSystemText = [dynamicHeader, messageAddons, discoveryContext]
-    .filter(Boolean).join('\n\n');
+  // System prompt split into 3 blocks for maximum cache efficiency:
+  //  Block 1 (static)    — full system prompt file, ~7k tokens, never changes → always cached
+  //  Block 2 (discovery) — events + funnel defs + prefetched results, ~1-2k tokens,
+  //                        stable for 10 min (matches discovery cache TTL) → cached between
+  //                        tool-loop iterations and follow-up questions within 5 min
+  //  Block 3 (fresh)     — datetime, connected dashboards, per-message addons → always fresh
+  const staticSystemText = basePrompt;
+  const freshSystemText = [dynamicHeader, messageAddons].filter(Boolean).join('\n\n');
+
+  const systemBlocks = [
+    {
+      type: 'text',
+      text: staticSystemText,
+      cache_control: { type: 'ephemeral' }, // ~7k tokens — cached every request
+    },
+  ];
+  if (discoveryContext) {
+    // Discovery is stable within the discovery cache TTL (10 min).
+    // All tool-loop API calls (2nd, 3rd, 4th) within the same question hit this as a read.
+    systemBlocks.push({
+      type: 'text',
+      text: discoveryContext,
+      cache_control: { type: 'ephemeral' }, // ~1-2k tokens — cached within session
+    });
+  }
+  systemBlocks.push({
+    type: 'text',
+    text: freshSystemText, // datetime + dashboards — always fresh, not cached
+  });
 
   const sanitizedHistory = sanitizeHistory(conversationHistory);
   // Track where current-turn messages start (after history + current user msg)
@@ -486,17 +613,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   const requestOptions = {
     model: DEFAULT_MODEL,
     max_tokens: 4096,
-    system: [
-      {
-        type: 'text',
-        text: staticSystemText,
-        cache_control: { type: 'ephemeral' }, // ~7k tokens — cached, same every request
-      },
-      {
-        type: 'text',
-        text: dynamicSystemText, // date, dashboards, events, funnels — fresh each request
-      },
-    ],
+    system: systemBlocks,
     messages,
   };
 

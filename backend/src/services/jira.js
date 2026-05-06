@@ -45,13 +45,16 @@ function jiraClient(accessToken, cloudId) {
 }
 
 // --- OAuth helpers ---
-export function buildJiraAuthUrl(workspaceId) {
+export function buildJiraAuthUrl(workspaceId, channelId = '') {
+  // Encode workspaceId + channelId together in state so the OAuth callback can
+  // post a Slack confirmation to the right channel after the token exchange.
+  const state = channelId ? `${workspaceId}|${channelId}` : workspaceId;
   const params = new URLSearchParams({
     audience: 'api.atlassian.com',
     client_id: process.env.JIRA_CLIENT_ID,
     scope: 'read:jira-work read:jira-user offline_access',
     redirect_uri: process.env.JIRA_REDIRECT_URI,
-    state: workspaceId,
+    state,
     response_type: 'code',
     prompt: 'consent',
   });

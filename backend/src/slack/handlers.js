@@ -12,6 +12,8 @@ import {
   incrementApiUsage,
   getMonthlyUsage,
   getTotalMonthlyUsage,
+  addEventToDictionary,
+  updateWorkspaceEventDictionary,
 } from '../services/db.js';
 import { sendOwnerAlert, checkApibudget } from '../services/ownerAlerts.js';
 import {
@@ -36,11 +38,11 @@ import {
   formatFirstConnection,
   injectLinks,
 } from './formatter.js';
-import { popReadMore } from './readMoreStore.js';
+import { popReadMore, getReadMore } from './readMoreStore.js';
 import { executeMixpanelTool } from '../services/mixpanel.js';
 
-const JIRA_AUTH_URL = (workspaceId) =>
-  `${process.env.BACKEND_URL}/api/oauth/jira/start?workspace_id=${workspaceId}`;
+const JIRA_AUTH_URL = (workspaceId, channelId = '') =>
+  `${process.env.BACKEND_URL}/api/oauth/jira/start?workspace_id=${workspaceId}${channelId ? `&channel_id=${encodeURIComponent(channelId)}` : ''}`;
 
 // Tracks users currently going through Mixpanel setup flow
 const mixpanelSetupState = new Map(); // slackUserId -> { step, projectId, username }
@@ -150,12 +152,13 @@ export async function handleMessage({ message, say, client, context }) {
     return;
   }
 
-  if (lower.includes('connect jira') || lower.includes('חבר jira') || lower.includes('חיבור jira')) {
-    if (isJiraValid(workspace)) {
+  if (lower.includes('connect jira') || lower.includes('חבר jira') || lower.includes('חיבור jira') ||
+      lower.includes('reconnect jira') || lower.includes('חבר מחדש jira')) {
+    if (isJiraValid(workspace) && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
       await say({ text: 'Jira is already connected ✅' });
       return;
     }
-    await sayJiraConnect(workspaceId, say);
+    await sayJiraConnect(workspaceId, say, channelId);
     return;
   }
 
@@ -166,6 +169,37 @@ export async function handleMessage({ message, say, client, context }) {
     const projectKey = jiraProjectMatch[1].toUpperCase();
     await updateWorkspaceJiraProject(workspaceId, projectKey);
     await say({ text: `✅ Default Jira project set to *${projectKey}*. Sarah will now filter all Jira queries to this project.` });
+    return;
+  }
+
+  // --- Event Dictionary commands ---
+  // "set event [name] = [description]"  → add/update single entry
+  // "clear event dictionary"             → wipe all entries
+  // "show event dictionary"              → display current dictionary
+  const setEventMatch = text.match(/^set event\s+(.+?)\s*=\s*(.+)$/i);
+  if (setEventMatch) {
+    const [, eventName, description] = setEventMatch;
+    await addEventToDictionary(workspaceId, eventName.trim(), description.trim());
+    await say({ text: `✅ Event dictionary updated:\n\`${eventName.trim()}\` = ${description.trim()}` });
+    return;
+  }
+  if (lower === 'clear event dictionary') {
+    await updateWorkspaceEventDictionary(workspaceId, {});
+    await say({ text: '✅ Event dictionary cleared.' });
+    return;
+  }
+  if (lower === 'show event dictionary') {
+    const ws = await getWorkspace(workspaceId);
+    const dict = ws.event_dictionary
+      ? (typeof ws.event_dictionary === 'string' ? JSON.parse(ws.event_dictionary) : ws.event_dictionary)
+      : {};
+    const entries = Object.entries(dict);
+    if (entries.length === 0) {
+      await say({ text: 'Event dictionary is empty.\nAdd entries with: `set event [name] = [description]`' });
+    } else {
+      const lines = entries.map(([k, v]) => `• \`${k}\` = ${v}`).join('\n');
+      await say({ text: `*Event Dictionary* (${entries.length} entries):\n${lines}` });
+    }
     return;
   }
 
@@ -214,6 +248,9 @@ export async function handleMessage({ message, say, client, context }) {
       } catch { /* cost tracking must never block the user */ }
     }
 
+    // DEBUG — log raw Sarah output before any post-processing
+    console.log('[DEBUG:raw] Sarah raw response\n---\n' + result.response + '\n---');
+
     const linkedResponse = injectLinks(result.response, workspace);
     await client.chat.update({
       channel: channelId,
@@ -244,7 +281,7 @@ export async function handleMessage({ message, say, client, context }) {
     // Jira token expired/revoked mid-conversation → clear from DB + show reconnect
     if (result.jiraAuthFailed) {
       await clearJiraToken(workspaceId);
-      const jiraUrl = JIRA_AUTH_URL(workspaceId);
+      const jiraUrl = JIRA_AUTH_URL(workspaceId, channelId);
       await say({
         blocks: [
           {
@@ -330,8 +367,8 @@ async function startMixpanelStep1(userId, say, workspaceId) {
   });
 }
 
-async function sayJiraConnect(workspaceId, say) {
-  const url = JIRA_AUTH_URL(workspaceId);
+async function sayJiraConnect(workspaceId, say, channelId = '') {
+  const url = JIRA_AUTH_URL(workspaceId, channelId);
   await say({
     blocks: [
       {
@@ -525,17 +562,37 @@ export async function handleAction({ action, ack, say, body, context, client }) 
   }
 
   if (action.action_id === 'read_more') {
-    const rest = await popReadMore(action.value);
+    // value is either "restId|summaryId" (new) or just "restId" (legacy messages)
+    const hasToggle = action.value.includes('|');
+    const [restId, summaryId] = hasToggle ? action.value.split('|') : [action.value, null];
+
+    // Use non-destructive get for new format so Read less can restore the summary;
+    // fall back to destructive pop for legacy messages that have no summaryId.
+    const rest = hasToggle
+      ? await getReadMore(restId)
+      : await popReadMore(restId);
+
     if (!rest) {
       await say({ text: ':hourglass: This content has expired — please ask again.' });
       return;
     }
-    // Bug 3 fix — expand content INSIDE the same message (not as a new message below)
-    // Strip the "Read more" button block, then append the expanded blocks to the original
+
     const channelId = body.channel?.id || body.container?.channel_id;
     const summaryBlocks = (body.message?.blocks || []).filter(b => b.type !== 'actions');
     const restBlocks = formatResponse(rest);
-    const fullBlocks = [...summaryBlocks, ...restBlocks];
+
+    // For new-format messages append a "Read less ▲" toggle button
+    const toggleBlock = hasToggle ? [{
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: 'Read less ▲' },
+        action_id: 'read_less',
+        value: `${summaryId}|${restId}`,
+      }],
+    }] : [];
+
+    const fullBlocks = [...summaryBlocks, ...restBlocks, ...toggleBlock];
     const fullText = summaryBlocks.map(b => b.text?.text || '').join(' ').trim() + '\n' + rest;
 
     if (client && channelId && body.message?.ts) {
@@ -544,6 +601,47 @@ export async function handleAction({ action, ack, say, body, context, client }) 
         ts: body.message.ts,
         blocks: fullBlocks,
         text: fullText.slice(0, 200),
+      });
+    }
+    return;
+  }
+
+  if (action.action_id === 'read_less') {
+    // value is "summaryId|restId"
+    const [summaryId, restId] = action.value.split('|');
+    const summary = await getReadMore(summaryId);
+
+    if (!summary) {
+      await say({ text: ':hourglass: This content has expired — please ask again.' });
+      return;
+    }
+
+    const channelId = body.channel?.id || body.container?.channel_id;
+    const summaryBlocks = formatResponse(summary);
+
+    summaryBlocks.push({
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: 'Read more ▼' },
+        action_id: 'read_more',
+        value: `${restId}|${summaryId}`,
+      }],
+    });
+
+    const collapseText = summaryBlocks
+      .filter(b => b.type === 'section')
+      .map(b => b.text?.text || '')
+      .join(' ')
+      .trim()
+      .slice(0, 200);
+
+    if (client && channelId && body.message?.ts) {
+      await client.chat.update({
+        channel: channelId,
+        ts: body.message.ts,
+        blocks: summaryBlocks,
+        text: collapseText,
       });
     }
     return;
@@ -574,7 +672,7 @@ export async function handleAction({ action, ack, say, body, context, client }) 
       // Gap 3 — Onboarding Completed (Mixpanel fully connected)
       trackOnboardingCompleted(workspaceId, userId).catch(() => {});
 
-      const jiraUrl = JIRA_AUTH_URL(workspaceId);
+      const jiraUrl = JIRA_AUTH_URL(workspaceId, body?.channel?.id || '');
       await say({
         blocks: [
           {
@@ -636,7 +734,8 @@ export async function handleAction({ action, ack, say, body, context, client }) 
       await say({ text: 'Jira is already connected ✅' });
       return;
     }
-    await sayJiraConnect(workspaceId, say);
+    const channelIdForJira = body?.channel?.id || body?.container?.channel_id || '';
+    await sayJiraConnect(workspaceId, say, channelIdForJira);
     return;
   }
 }

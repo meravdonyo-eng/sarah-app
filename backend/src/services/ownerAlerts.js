@@ -170,36 +170,66 @@ export function startTokenRefreshDaemon() {
       for (const ws of workspaces) {
         if (!ws.jira_access_token || !ws.jira_refresh_token) continue;
         const expiresAt = parseInt(ws.jira_expires_at || '0');
-        if (expiresAt - now > FIVE_MIN_MS) continue; // still valid
 
+        // --- Step 1: Refresh token if expiring soon ---
+        if (expiresAt - now <= FIVE_MIN_MS) {
+          try {
+            const { refreshJiraToken } = await import('./jira.js');
+            await refreshJiraToken({
+              refreshToken: decrypt(ws.jira_refresh_token),
+              workspaceId: ws.workspace_id,
+            });
+            console.log(`[TokenDaemon] Refreshed Jira token for workspace ${ws.workspace_id}`);
+            failureAlerted.delete(ws.workspace_id);
+          } catch (err) {
+            console.error(`[TokenDaemon] Refresh failed for ${ws.workspace_id}:`, err.message);
+
+            const lastAlerted = failureAlerted.get(ws.workspace_id);
+            if (lastAlerted && now - lastAlerted < ALERT_DEDUP_MS) continue;
+            failureAlerted.set(ws.workspace_id, now);
+
+            sendOwnerAlert({
+              subject: `OAuth refresh failed: workspace ${ws.workspace_id}`,
+              body: `Tool: Jira. Error: ${err.message}\nUser will be prompted to reconnect next time they message Sarah.`,
+              channels: ['slack_dm'],
+            }).catch(() => {});
+
+            // NO user DM from daemon — users are notified via handlers.js (jiraAuthFailed
+            // path) the next time they send a message. Proactive DMs from daemon = spam.
+            continue;
+          }
+        }
+
+        // --- Step 2: Validate Jira is actually queryable (not just token-valid) ---
+        // Runs every daemon cycle to catch cases where token is valid but API calls fail
+        // (rate limit, cloud ID mismatch, network issues). Distinct from auth failures.
         try {
-          // Dynamic import to avoid circular dependency
-          const { refreshJiraToken } = await import('./jira.js');
-          await refreshJiraToken({
+          const { executeJiraTool } = await import('./jira.js');
+          await executeJiraTool('jira_list_projects', { max_results: 1 }, {
+            accessToken: decrypt(ws.jira_access_token),
             refreshToken: decrypt(ws.jira_refresh_token),
+            cloudId: ws.jira_cloud_id,
+            expiresAt: ws.jira_expires_at,
             workspaceId: ws.workspace_id,
           });
-          // Fix 3 — removed `_ = refreshed` (token is saved inside refreshJiraToken)
-          console.log(`[TokenDaemon] Refreshed Jira token for workspace ${ws.workspace_id}`);
-          // Clear dedup flag so a future failure will alert again
-          failureAlerted.delete(ws.workspace_id);
+          console.log(`[TokenDaemon] Jira connectivity OK for workspace ${ws.workspace_id} (cloudId=${ws.jira_cloud_id})`);
         } catch (err) {
-          console.error(`[TokenDaemon] Refresh failed for ${ws.workspace_id}:`, err.message);
-
-          // Fix 1 — only alert once per workspace; skip if already alerted recently
-          const lastAlerted = failureAlerted.get(ws.workspace_id);
-          if (lastAlerted && now - lastAlerted < ALERT_DEDUP_MS) continue;
-          failureAlerted.set(ws.workspace_id, now);
-
-          sendOwnerAlert({
-            subject: `OAuth refresh failed: workspace ${ws.workspace_id}`,
-            body: `Tool: Jira. Error: ${err.message}\nUser will be prompted to reconnect next time they message Sarah.`,
-            channels: ['slack_dm'],
-          }).catch(() => {});
-
-          // Fix 2 — NO user DM from daemon.
-          // Users are notified via handlers.js (jiraAuthFailed path) the next
-          // time they send a message — not proactively by the daemon.
+          // Auth errors (401/403) are expected if token just expired and refresh is pending —
+          // don't double-alert. Only alert for non-auth connectivity failures.
+          const isAuthErr = err.response?.status === 401 || err.response?.status === 403 ||
+            err.message?.includes('401') || err.message?.includes('403');
+          if (!isAuthErr) {
+            console.error(`[TokenDaemon] Jira connectivity check FAILED for ${ws.workspace_id}:`, err.message);
+            const lastAlerted = failureAlerted.get(`conn:${ws.workspace_id}`);
+            if (!lastAlerted || now - lastAlerted >= ALERT_DEDUP_MS) {
+              failureAlerted.set(`conn:${ws.workspace_id}`, now);
+              sendOwnerAlert({
+                subject: `Jira unreachable: workspace ${ws.workspace_id}`,
+                body: `Token valid but API queries fail. cloudId=${ws.jira_cloud_id}. Error: ${err.message}\nSarah will report "Jira not responding" to users.`,
+                channels: ['slack_dm'],
+              }).catch(() => {});
+            }
+          }
         }
       }
     } catch (err) {

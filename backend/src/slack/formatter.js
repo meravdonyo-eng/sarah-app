@@ -3,6 +3,7 @@
  * Handles RTL (Hebrew) and LTR (English) automatically.
  */
 import { storeReadMore } from './readMoreStore.js';
+import { decrypt } from '../services/encryption.js';
 
 /**
  * Converts standard markdown to Slack mrkdwn format.
@@ -55,10 +56,43 @@ function wrapLine(text, maxLen = 75) {
 function parseSections(text) {
   return text.split('\n').map(line => {
     if (line.trim() === '') return { type: 'spacer', raw: '' };
-    if (/^\*\*/.test(line.trim())) return { type: 'header', raw: line };
+    // After formatForSlack runs, **Header:** becomes *Header:* — detect single-* bold lines as headers.
+    // [^\s*] ensures we don't match bullet items like "* item" (asterisk+space) or "**" leftover.
+    if (/^\*[^\s*]/.test(line.trim())) return { type: 'header', raw: line };
     if (/^[•\-*]\s/.test(line.trim()) || /^\d+\.\s/.test(line.trim())) return { type: 'bullet', raw: line };
     return { type: 'text', raw: line };
   });
+}
+
+/**
+ * Returns true for the Bottom Line block: the first section block that doesn't
+ * start with a bold header (*Header:*). The RTL mark prefix (U+200F) is stripped
+ * before the check so Hebrew responses are handled correctly.
+ */
+function isBottomLineBlock(block, index) {
+  if (index !== 0 || block.type !== 'section') return false;
+  const text = block.text.text.startsWith('‏')
+    ? block.text.text.slice(1)
+    : block.text.text;
+  return !text.startsWith('*');
+}
+
+/**
+ * Splits Bottom Line text at sentence boundaries so each sentence gets its own line.
+ * Rules:
+ *   - Only runs when text is longer than maxLineLength chars (short BLs stay untouched)
+ *   - Splits at ". " / "! " / "? " when followed by uppercase or digit
+ *   - The [^A-Z] lookbehind skips abbreviation-style dots (e.g., vs. or e.g.)
+ *   - "word. (Confirmed)" is NOT split — ( is excluded from the lookahead
+ *   - Returns original text if no sentence boundary found
+ */
+function splitBottomLineIntoSentences(text, maxLineLength = 75) {
+  if (text.length <= maxLineLength) return text;
+  // Require non-uppercase before punctuation to avoid "Mr. Smith" false splits.
+  // Require uppercase or digit after to avoid splitting before "(Confirmed)".
+  const sentenceEnd = /(?<=[^A-Z][.!?])\s+(?=[A-Z0-9])/g;
+  const sentences = text.split(sentenceEnd);
+  return sentences.length > 1 ? sentences.join('\n') : text;
 }
 
 /**
@@ -89,6 +123,17 @@ function buildBlocks(lines, rtl) {
     }
   }
   flush();
+
+  // Apply sentence-level line breaking to the Bottom Line (first block, no header).
+  // Skipped for RTL content — Hebrew naturally reads right-to-left without needing manual breaks.
+  if (!rtl && blocks.length > 0 && isBottomLineBlock(blocks[0], 0)) {
+    const bl = blocks[0];
+    const hasRtlPrefix = bl.text.text.startsWith('‏');
+    const raw = hasRtlPrefix ? bl.text.text.slice(1) : bl.text.text;
+    const broken = splitBottomLineIntoSentences(raw);
+    bl.text.text = hasRtlPrefix ? '‏' + broken : broken;
+  }
+
   return blocks;
 }
 
@@ -124,15 +169,32 @@ function chunkBlocks(blocks) {
  */
 export function injectLinks(text, workspace) {
   if (!workspace) return text;
+
+  // Jira ticket IDs (PROJ-123) → browse URL (stored as plain text, no decrypt needed).
+  // Use alternation to skip text already inside Slack URL format <...|...> — replacing
+  // a ticket ID inside an existing Slack URL would produce broken nested markup.
   const jiraBase = workspace.jira_cloud_url;
   if (jiraBase) {
-    text = text.replace(/\b([A-Z][A-Z0-9]+-\d+)\b/g, (_, key) => `<${jiraBase}/browse/${key}|${key}>`);
+    text = text.replace(/(<[^>]+>)|(\b[A-Z][A-Z0-9]+-\d+\b)/g, (match, slackUrl, ticketId) => {
+      if (slackUrl) return slackUrl; // already a Slack URL — keep as-is
+      return `<${jiraBase}/browse/${ticketId}|${ticketId}>`; // bare ticket ID — link it
+    });
   }
-  const mixpanelProject = workspace.mixpanel_project_id;
-  if (mixpanelProject) {
-    const mixpanelUrl = `https://mixpanel.com/project/${mixpanelProject}`;
-    text = text.replace(/\bMixpanel\b/g, `<${mixpanelUrl}|Mixpanel>`);
+
+  // Mixpanel project ID is encrypted in DB — decrypt before building URL
+  const encryptedProjectId = workspace.mixpanel_project_id;
+  if (encryptedProjectId) {
+    let projectId;
+    try { projectId = decrypt(encryptedProjectId); } catch { projectId = encryptedProjectId; }
+    const mixpanelUrl = `https://mixpanel.com/project/${projectId}`;
+
+    // Replace [MIXPANEL_LINK] placeholder that Claude writes for explicit dashboard links.
+    // We do NOT use a broad /\bMixpanel\b/ replacement — if Claude writes a Slack URL like
+    // <url|Mixpanel> and the regex also matches the label "Mixpanel", it double-links and
+    // produces broken markup like <url|<url2|Mixpanel>>. Controlled placeholder only.
+    text = text.replace(/\[MIXPANEL_LINK\]/g, `<${mixpanelUrl}|Mixpanel dashboard>`);
   }
+
   return text;
 }
 
@@ -159,6 +221,8 @@ function cleanResponseText(text) {
 export function formatResponse(text) {
   const cleaned = cleanResponseText(text);
   const rtl = isRTL(cleaned);
+  // DEBUG — log cleaned text before formatForSlack; reveals whether headers have asterisks
+  console.log('[DEBUG:preFmt] text before formatForSlack\n---\n' + cleaned + '\n---');
   const slackText = formatForSlack(cleaned);
   const lines = parseSections(slackText);
   const blocks = buildBlocks(lines, rtl);
@@ -385,9 +449,15 @@ export async function formatResponseSmart(text) {
   const cleanedSummary = cleanResponseText(split.summary);
   const cleanedRest = cleanResponseText(split.rest);
 
-  const id = await storeReadMore(cleanedRest);
+  // Store both halves so we can toggle between them without losing content
+  const [restId, summaryId] = await Promise.all([
+    storeReadMore(cleanedRest),
+    storeReadMore(cleanedSummary),
+  ]);
   const rtl = isRTL(cleanedSummary);
 
+  // DEBUG — log summary before formatForSlack; check header syntax (*Key Data:* vs Key Data:)
+  console.log('[DEBUG:preFmt] summary before formatForSlack\n---\n' + cleanedSummary + '\n---');
   const slackText = formatForSlack(cleanedSummary);
   const blocks = chunkBlocks(buildBlocks(parseSections(slackText), rtl));
 
@@ -397,16 +467,24 @@ export async function formatResponseSmart(text) {
       type: 'button',
       text: { type: 'plain_text', text: 'Read more ▼' },
       action_id: 'read_more',
-      value: id,
+      // composite value: restId|summaryId — both needed for the toggle
+      value: `${restId}|${summaryId}`,
     }],
   });
 
   return blocks;
 }
 
+const THINKING_MESSAGES = [
+  '_Sarah is working on it..._',
+  '_Give Sarah a moment..._',
+  '_Sarah is on it — this may take a few seconds..._',
+  '_Sarah is pulling the data — this may take a few seconds..._',
+];
+
 export function formatThinking(isComplex = false) {
   const msg = isComplex
-    ? '_Sarah is cross-referencing Mixpanel and Jira — this may take a few seconds..._'
+    ? THINKING_MESSAGES[Math.floor(Math.random() * THINKING_MESSAGES.length)]
     : '_Sarah is thinking..._';
   return [
     {

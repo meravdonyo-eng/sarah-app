@@ -27,13 +27,29 @@ function daysAgo(n) {
 
 /**
  * Race a promise against a wall-clock timeout.
- * Returns null if the timeout fires first (never throws).
+ * Returns null if the timeout fires first or the promise rejects.
+ * Logs the error before swallowing so failures are visible in server logs.
  */
-function withTimeout(promise, ms = QUERY_TIMEOUT_MS) {
-  return Promise.race([
-    promise.catch(() => null),
-    new Promise(resolve => setTimeout(() => resolve(null), ms)),
-  ]);
+function withTimeout(promise, label, ms = QUERY_TIMEOUT_MS) {
+  const start = Date.now();
+  const raceTimeout = new Promise(resolve =>
+    setTimeout(() => {
+      console.warn(`[Snapshot] ⏱ TIMEOUT after ${ms}ms: ${label}`);
+      resolve(null);
+    }, ms)
+  );
+  const racePromise = promise
+    .then(result => {
+      console.log(`[Snapshot] ✓ ${label} (${Date.now() - start}ms)`);
+      return result;
+    })
+    .catch(err => {
+      const status = err?.response?.status;
+      const body   = JSON.stringify(err?.response?.data ?? err?.message ?? err).slice(0, 300);
+      console.error(`[Snapshot] ✗ FAILED ${label} (${Date.now() - start}ms) status=${status ?? 'n/a'}: ${body}`);
+      return null;
+    });
+  return Promise.race([racePromise, raceTimeout]);
 }
 
 /**
@@ -63,6 +79,8 @@ async function runQueries(workspace) {
   );
   const hasJira = isJiraValid(workspace);
 
+  console.log(`[Snapshot] runQueries wsId=${workspace.workspace_id} hasMixpanel=${hasMixpanel} hasJira=${hasJira}`);
+
   const yesterday = daysAgo(1);
 
   const mixpanelCreds = hasMixpanel ? {
@@ -70,6 +88,10 @@ async function runQueries(workspace) {
     username:  decrypt(workspace.mixpanel_username),
     secret:    decrypt(workspace.mixpanel_secret),
   } : null;
+
+  if (hasMixpanel) {
+    console.log(`[Snapshot] Mixpanel projectId=${mixpanelCreds.projectId?.slice(0, 8)}... username=${mixpanelCreds.username?.slice(0, 6)}...`);
+  }
 
   const jiraCreds = hasJira ? {
     accessToken:  decrypt(workspace.jira_access_token),
@@ -96,7 +118,8 @@ async function runQueries(workspace) {
             to_date:   yesterday,
             unit:      'day',
             type:      'unique',
-          }, mixpanelCreds).then(r => extractUniqueUsers(r, 'Sign Up Started'))
+          }, mixpanelCreds).then(r => extractUniqueUsers(r, 'Sign Up Started')),
+          `mixpanel_segmentation "Sign Up Started" ${yesterday}`
         )
       : Promise.resolve(null),
 
@@ -109,7 +132,8 @@ async function runQueries(workspace) {
             to_date:   yesterday,
             unit:      'day',
             type:      'unique',
-          }, mixpanelCreds).then(r => extractUniqueUsers(r, 'Error Shown'))
+          }, mixpanelCreds).then(r => extractUniqueUsers(r, 'Error Shown')),
+          `mixpanel_segmentation "Error Shown" ${yesterday}`
         )
       : Promise.resolve(null),
 
@@ -119,7 +143,8 @@ async function runQueries(workspace) {
           executeJiraTool('jira_search_issues', {
             jql: `${projectFilter}updated >= -24h ORDER BY updated DESC`,
             max_results: 10,
-          }, jiraCreds)
+          }, jiraCreds),
+          'jira updated >= -24h'
         )
       : Promise.resolve(null),
 
@@ -129,7 +154,8 @@ async function runQueries(workspace) {
           executeJiraTool('jira_search_issues', {
             jql: `${projectFilter}created >= -24h ORDER BY created DESC`,
             max_results: 5,
-          }, jiraCreds)
+          }, jiraCreds),
+          'jira created >= -24h'
         )
       : Promise.resolve(null),
   ]);
@@ -176,9 +202,9 @@ async function runQueries(workspace) {
     }
   }
 
-  console.log(`[Snapshot] signUps=${signUps} errors=${errors} jiraUpdated=${jiraUpdated?.issues?.length ?? 'n/a'} jiraCreated=${jiraCreated?.issues?.length ?? 'n/a'} crossRef=${crossRefAlerts.length}`);
+  console.log(`[Snapshot] results: signUps=${signUps} errors=${errors} jiraUpdated=${jiraUpdated?.issues?.length ?? 'n/a'} jiraCreated=${jiraCreated?.issues?.length ?? 'n/a'} crossRef=${crossRefAlerts.length}`);
 
-  return { signUps, errors, jiraUpdated, jiraCreated, crossRefAlerts };
+  return { signUps, errors, jiraUpdated, jiraCreated, crossRefAlerts, hasMixpanel, hasJira };
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +212,7 @@ async function runQueries(workspace) {
 // ---------------------------------------------------------------------------
 
 function buildMessage(results, lang = 'he') {
-  const { signUps, errors, jiraUpdated, jiraCreated, crossRefAlerts } = results;
+  const { signUps, errors, jiraUpdated, jiraCreated, crossRefAlerts, hasMixpanel, hasJira } = results;
 
   const signUpsStr = signUps !== null ? String(signUps)              : 'unavailable';
   const errorsStr  = errors  !== null ? `${errors} users affected`   : 'unavailable';
@@ -227,14 +253,35 @@ function buildMessage(results, lang = 'he') {
   const lines = [
     greeting,
     '',
-    '📊 Last 24h (Mixpanel):',
-    `• Sign Ups: ${signUpsStr} | Errors: ${errorsStr}`,
   ];
+
+  // Mixpanel section — only show if at least one metric returned a real value.
+  // "unavailable" on both means the hardcoded event names don't exist in this workspace —
+  // showing two "unavailable" lines adds noise, not value.
+  if (signUps !== null || errors !== null) {
+    lines.push('📊 Last 24h (Mixpanel):');
+    lines.push(`• Sign Ups: ${signUpsStr} | Errors: ${errorsStr}`);
+  } else if (hasMixpanel) {
+    // Mixpanel IS connected but events returned no data — guide the PM
+    lines.push(
+      lang === 'he'
+        ? '📊 Mixpanel מחובר — שאלי אותי על אירועי המשתמשים שלך'
+        : '📊 Mixpanel connected — ask me about your user events'
+    );
+  }
 
   if (hasJiraUpdates) {
     lines.push('');
     lines.push('🎫 Jira (last 24h):');
     lines.push(...jiraLines);
+  } else if (!hasJira) {
+    // Jira not connected — nudge the PM so they know it's available
+    lines.push('');
+    lines.push(
+      lang === 'he'
+        ? '🔗 Jira לא מחובר — כתוב *connect jira* כדי לחבר'
+        : '🔗 Jira not connected — type *connect jira* to set it up'
+    );
   }
 
   lines.push('');

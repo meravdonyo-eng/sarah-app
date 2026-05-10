@@ -168,7 +168,7 @@ export function startTokenRefreshDaemon() {
       const now = Date.now();
 
       for (const ws of workspaces) {
-        if (!ws.jira_access_token || !ws.jira_refresh_token) continue;
+        if (!ws.jira_access_token || !ws.jira_refresh_token || !ws.jira_cloud_id) continue;
         const expiresAt = parseInt(ws.jira_expires_at || '0');
 
         // --- Step 1: Refresh token if expiring soon ---
@@ -178,6 +178,7 @@ export function startTokenRefreshDaemon() {
             await refreshJiraToken({
               refreshToken: decrypt(ws.jira_refresh_token),
               workspaceId: ws.workspace_id,
+              cloudId: ws.jira_cloud_id, // preserve cloudId — omitting it caused updateWorkspaceJira to null it out
             });
             console.log(`[TokenDaemon] Refreshed Jira token for workspace ${ws.workspace_id}`);
             failureAlerted.delete(ws.workspace_id);

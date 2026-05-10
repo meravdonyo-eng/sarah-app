@@ -116,12 +116,12 @@ export async function updateWorkspaceJira(workspaceId, { accessToken, refreshTok
     `UPDATE workspaces
      SET jira_access_token  = $2,
          jira_refresh_token = $3,
-         jira_cloud_id      = $4,
+         jira_cloud_id      = COALESCE($4, jira_cloud_id),
          jira_expires_at    = $5,
          jira_cloud_url     = COALESCE($6, jira_cloud_url),
          updated_at         = NOW()
      WHERE workspace_id = $1`,
-    [workspaceId, accessToken, refreshToken, cloudId, expiresAt, cloudUrl || null]
+    [workspaceId, accessToken, refreshToken, cloudId || null, expiresAt, cloudUrl || null]
   );
 }
 

@@ -535,7 +535,9 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
             : workspace.event_dictionary)
         : null;
       const dictSection = eventDictionary && Object.keys(eventDictionary).length > 0
-        ? 'Event Dictionary (use to interpret cryptic event names):\n' +
+        ? '⚠️ EVENT DICTIONARY — MANDATORY LOOKUP (check BEFORE choosing any event name):\n' +
+          'If the PM\'s question contains a business term (e.g. "active users", "activation", "retention", "churned"),\n' +
+          'you MUST find the matching event here first. NEVER guess or default to a generic event when this dictionary is present.\n' +
           Object.entries(eventDictionary)
             .map(([k, v]) => `  '${k}' = ${v}`)
             .join('\n')
@@ -557,6 +559,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         funnelResultsStr ? '=== END FUNNEL RESULTS ===' : '',
         '',
         '⚠️ CRITICAL INSTRUCTIONS:',
+        dictSection ? '0. EVENT DICTIONARY IS MANDATORY: Before selecting ANY event name for a query, check the Event Dictionary above. If the PM\'s question contains a business term that appears in the dictionary, you MUST use the mapped event. No exceptions, no guessing.' : null,
         '1. Do NOT call mixpanel_list_events, mixpanel_list_funnels — data is above.',
         funnelResultsStr
           ? `2. PRE-LOADED DATA covers exactly: ${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} to ${new Date().toISOString().split('T')[0]} (last 30 days). Use the user counts from the funnel table above ONLY for questions about this period. Do NOT call mixpanel_funnel or mixpanel_segmentation for this period.`

@@ -177,10 +177,17 @@ function buildTools(workspace) {
 }
 
 // Cache for Mixpanel discovery calls (list_events, list_funnels) — TTL 10 min
-const mixpanelDiscoveryCache = new Map(); // key: `${workspaceId}:${toolName}` → { result, expiresAt }
+const mixpanelDiscoveryCache = new Map(); // key: `${workspaceId}:${toolName}` → { result, storedAt, expiresAt }
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
 // Only zero-arg discovery calls are cached (list_event_properties takes an event arg, so excluded)
 const DISCOVERY_TOOLS = new Set(['mixpanel_list_events', 'mixpanel_list_funnels']);
+
+// Cache for ALL other Mixpanel query results — TTL 1 hour.
+// Primary purpose: fallback when a live Mixpanel call fails (rate-limit, network, outage).
+// On cache hit after a failure, result is annotated with _source='cache' and _age_hours
+// so Claude can cite "From Mixpanel (cache, 2.3h old)" and downgrade confidence to Likely.
+const mixpanelResultCache = new Map(); // key: `${workspaceId}:${toolName}:${argsKey}` → { result, storedAt, expiresAt }
+const RESULT_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 // Cache for pre-fetched funnel results (last-30-days window, keyed by date so it refreshes daily)
 const prefetchedFunnelCache = new Map(); // key: `${workspaceId}:funnels30d:${toDate}` → { result, expiresAt }
@@ -255,7 +262,7 @@ async function executeTool(toolName, args, workspace) {
       secret: decrypt(workspace.mixpanel_secret),
     };
 
-    // Use cache for discovery calls (no args that vary per question)
+    // Fast discovery cache (10-min TTL) for zero-arg discovery calls
     if (DISCOVERY_TOOLS.has(toolName) && Object.keys(args).length === 0) {
       const cacheKey = `${workspace.workspace_id}:${toolName}`;
       const cached = mixpanelDiscoveryCache.get(cacheKey);
@@ -264,12 +271,33 @@ async function executeTool(toolName, args, workspace) {
         return cached.result;
       }
       const result = await executeMixpanelTool(toolName, args, creds);
-      mixpanelDiscoveryCache.set(cacheKey, { result, expiresAt: Date.now() + DISCOVERY_TTL_MS });
+      mixpanelDiscoveryCache.set(cacheKey, { result, storedAt: Date.now(), expiresAt: Date.now() + DISCOVERY_TTL_MS });
       console.log(`[Cache] SET ${toolName}`);
       return result;
     }
 
-    return executeMixpanelTool(toolName, args, creds);
+    // All other Mixpanel calls: try live → save on success (1h TTL) → fallback to cache on failure
+    const argsKey = JSON.stringify(args);
+    const resultCacheKey = `${workspace.workspace_id}:${toolName}:${argsKey}`;
+
+    try {
+      const result = await executeMixpanelTool(toolName, args, creds);
+      // Persist successful result so we can serve it as a fallback if future calls fail
+      mixpanelResultCache.set(resultCacheKey, { result, storedAt: Date.now(), expiresAt: Date.now() + RESULT_CACHE_TTL_MS });
+      return result;
+    } catch (liveErr) {
+      const cached = mixpanelResultCache.get(resultCacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        const ageHours = parseFloat(((Date.now() - cached.storedAt) / 3_600_000).toFixed(1));
+        console.warn(`[ResultCache] FALLBACK ${toolName} age=${ageHours}h — live failed: ${liveErr.message}`);
+        // Annotate result so Claude knows it's stale and can adjust confidence + citation
+        const annotated = Array.isArray(cached.result)
+          ? { data: cached.result, _source: 'cache', _age_hours: ageHours }
+          : { ...cached.result, _source: 'cache', _age_hours: ageHours };
+        return annotated;
+      }
+      throw liveErr; // No usable cache — propagate so the tool_result gets is_error: true
+    }
   }
   if (toolName.startsWith('jira_')) {
     const creds = {
@@ -568,6 +596,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         '4. AD-HOC FUNNELS: mixpanel_funnel accepts events=["Event A","Event B","Event C"] — no funnel_id needed. Use this for ANY conversion question, even if those events are not in a saved funnel.',
         '5. NEVER count users by summing daily segmentation values.',
         '6. Always state the source and period: "X unique users (funnel, last 30 days)" or "X unique users (funnel, <from> to <to>)".',
+        '7. CACHE METADATA: If a tool result contains _source="cache" and _age_hours, the live query failed and this is fallback data. You MUST: (a) downgrade confidence from Confirmed → Likely, (b) cite as "From Mixpanel (cache, X.Xh old):", (c) add to ❓ What I Don\'t Know: "Live Mixpanel data unavailable — using cache from X.X hours ago. Numbers may have shifted."',
       ].filter(l => l !== null).join('\n');
     } catch (e) {
       console.log('[PrefetchError]', e.message);

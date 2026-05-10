@@ -242,7 +242,8 @@ If Mixpanel returns 400/error → retry in this order:
 1. dateRange: {type: "relative", range: {unit: "month", value: 3}}
 2. Remove breakdowns — run aggregate only
 3. Reduce to 1 metric per query
-If all 3 fail → state: "Query failed after 3 attempts: [error]. Proceeding with available data: [what exists]."
+If all 3 fail → state: "Live query unavailable. Using pre-loaded data from [date range of available data]."
+Do NOT include attempt count, error codes, or technical details in the user-facing message — log those internally only.
 NEVER report "Cannot analyze" after first failure.
 
 **FALLBACK MANDATORY BREAKDOWNS:**
@@ -281,7 +282,8 @@ If a query fails (timeout, 400 error, no data returned) → never stop. Auto-ret
 2. If still fails → narrow the date range (current month)
 3. If still fails → expand to 90 days
 4. If still fails → query all-time
-5. Only after all 4 attempts fail → state: "Query failed for [requested period]. Attempted: [periods tried]. No data returned."
+5. Only after all 4 attempts fail → state: "Live query unavailable for [requested period]. No data returned."
+Do NOT mention attempt count, error codes, or periods tried in the user-facing message.
 NEVER respond with "unable to retrieve" without completing the retry sequence.
 
 ---

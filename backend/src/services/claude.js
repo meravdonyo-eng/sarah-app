@@ -475,6 +475,60 @@ function formatFunnelAsTable(f) {
   }
 }
 
+/**
+ * Build the Event Dictionary section injected into discoveryContext.
+ * Supports two formats:
+ *   Legacy flat:  { "active_user": "session_start", ... }
+ *   Rich (docx):  { business_metrics: {term: {event, description}},
+ *                   event_aliases:    {old: "current"},
+ *                   do_not_use_as_active_proxy: ["Sign Up Started", ...] }
+ * Both formats may also use {event, description} objects for any value.
+ */
+function buildDictSection(rawDict) {
+  if (!rawDict || Object.keys(rawDict).length === 0) return '';
+
+  const lines = [
+    '⚠️ EVENT DICTIONARY — MANDATORY LOOKUP (check BEFORE choosing any event name):',
+    "If the PM's question contains a business term below, you MUST use the mapped event. NEVER guess.",
+  ];
+
+  const isRichFormat = rawDict.business_metrics || rawDict.event_aliases ||
+    Array.isArray(rawDict.do_not_use_as_active_proxy);
+
+  if (isRichFormat) {
+    if (rawDict.business_metrics && Object.keys(rawDict.business_metrics).length > 0) {
+      lines.push('', 'Business terms → events:');
+      for (const [term, info] of Object.entries(rawDict.business_metrics)) {
+        const event = typeof info === 'string' ? info : (info.event ?? '?');
+        const desc  = (typeof info === 'object' && info.description) ? ` (${info.description})` : '';
+        lines.push(`  '${term}' → '${event}'${desc}`);
+      }
+    }
+    if (rawDict.event_aliases && Object.keys(rawDict.event_aliases).length > 0) {
+      lines.push('', 'Legacy aliases (old name = current name):');
+      for (const [old, current] of Object.entries(rawDict.event_aliases)) {
+        lines.push(`  '${old}' = '${current}'`);
+      }
+    }
+    if (Array.isArray(rawDict.do_not_use_as_active_proxy) && rawDict.do_not_use_as_active_proxy.length > 0) {
+      lines.push('', `⛔ NEVER use these events as an "active user" proxy: ${rawDict.do_not_use_as_active_proxy.join(', ')}`);
+    }
+  } else {
+    // Legacy flat format: { "term": "eventName" } or { "term": { event, description } }
+    lines.push('');
+    for (const [k, v] of Object.entries(rawDict)) {
+      if (typeof v === 'string') {
+        lines.push(`  '${k}' = ${v}`);
+      } else if (v && typeof v === 'object' && v.event) {
+        const desc = v.description ? ` (${v.description})` : '';
+        lines.push(`  '${k}' = ${v.event}${desc}`);
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export async function sendMessageWithTools(workspace, userMessage, conversationHistory = [], signal = null, options = {}) {
   const anthropic = getClient();
   let tools = buildTools(workspace);
@@ -555,21 +609,14 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         : rawFunnelResults;
 
       // Event Dictionary — PM-defined human-readable names for cryptic event keys.
-      // Stored per-workspace in DB. If present, inject before the raw event list so
-      // Claude can map e.g. "usr_onb_s1" → "Onboarding step 1 completed".
+      // Stored per-workspace in DB. Supports legacy flat format and rich docx format
+      // (business_metrics / event_aliases / do_not_use_as_active_proxy).
       const eventDictionary = workspace.event_dictionary
         ? (typeof workspace.event_dictionary === 'string'
             ? JSON.parse(workspace.event_dictionary)
             : workspace.event_dictionary)
         : null;
-      const dictSection = eventDictionary && Object.keys(eventDictionary).length > 0
-        ? '⚠️ EVENT DICTIONARY — MANDATORY LOOKUP (check BEFORE choosing any event name):\n' +
-          'If the PM\'s question contains a business term (e.g. "active users", "activation", "retention", "churned"),\n' +
-          'you MUST find the matching event here first. NEVER guess or default to a generic event when this dictionary is present.\n' +
-          Object.entries(eventDictionary)
-            .map(([k, v]) => `  '${k}' = ${v}`)
-            .join('\n')
-        : '';
+      const dictSection = buildDictSection(eventDictionary);
 
       discoveryContext = [
         '\n\n--- PRE-LOADED MIXPANEL DATA (last 30 days) ---',
@@ -590,7 +637,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         dictSection ? '0. EVENT DICTIONARY IS MANDATORY: Before selecting ANY event name for a query, check the Event Dictionary above. If the PM\'s question contains a business term that appears in the dictionary, you MUST use the mapped event. No exceptions, no guessing.' : null,
         '1. Do NOT call mixpanel_list_events, mixpanel_list_funnels — data is above.',
         funnelResultsStr
-          ? `2. PRE-LOADED DATA covers exactly: ${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} to ${new Date().toISOString().split('T')[0]} (last 30 days). Use the user counts from the funnel table above ONLY for questions about this period. Do NOT call mixpanel_funnel or mixpanel_segmentation for this period.`
+          ? `2. PRE-LOADED DATA covers exactly: ${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} to ${new Date().toISOString().split('T')[0]} (last 30 days). Use the user counts from the funnel table above ONLY for questions about this period. Do NOT call mixpanel_funnel or mixpanel_segmentation for this period. CONFIDENCE CAP: pre-loaded data = max Likely (never Confirmed). Cite as "From Mixpanel (pre-loaded, last 30 days):". Confirmed is reserved for data fetched live in direct response to this question.`
           : '2. For conversion/step questions, call mixpanel_funnel (never segmentation).',
         '3. DATE RANGE MISMATCH RULE: If user asks about a DIFFERENT time range (last week, last quarter, specific dates, etc.) — call mixpanel_funnel with those exact dates AND the events array (e.g. events=["Sign Up Started","Activated"]). Never use the pre-loaded 30-day data for a different period.',
         '4. AD-HOC FUNNELS: mixpanel_funnel accepts events=["Event A","Event B","Event C"] — no funnel_id needed. Use this for ANY conversion question, even if those events are not in a saved funnel.',

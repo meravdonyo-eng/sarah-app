@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { MIXPANEL_TOOLS, executeMixpanelTool, getMixpanelProjectTimezone } from './mixpanel.js';
 import { JIRA_TOOLS, executeJiraTool } from './jira.js';
 import { decrypt } from './encryption.js';
+import { resolveAllIntents, formatResolvedIntents, extractEventNames } from './intentMapper.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -610,7 +611,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
       // Event Dictionary — PM-defined human-readable names for cryptic event keys.
       // Stored per-workspace in DB. Supports legacy flat format and rich docx format
-      // (business_metrics / event_aliases / do_not_use_as_active_proxy).
+      // (business_metrics / event_aliases / do_not_use_as_active_proxy / intents).
       const eventDictionary = workspace.event_dictionary
         ? (typeof workspace.event_dictionary === 'string'
             ? JSON.parse(workspace.event_dictionary)
@@ -618,10 +619,41 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         : null;
       const dictSection = buildDictSection(eventDictionary);
 
+      // Intent Mapper — resolve PM business intents to actual event names in this project.
+      // Runs ONLY when 'intents' key is present in event_dictionary.
+      // Dictionary explicit mappings (dictSection) take priority; Intent Mapper fills gaps.
+      let resolvedIntentsStr = '';
+      const intentDefs = eventDictionary?.intents;
+      if (intentDefs && Object.keys(intentDefs).length > 0) {
+        try {
+          const eventNames = extractEventNames(events);
+          const fromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+          const toDate   = new Date().toISOString().split('T')[0];
+
+          // Tier-2 volume helper: queries unique user count for a single event.
+          // Called lazily — only for top candidates with tier-1 confidence < 0.65.
+          const queryUniqueCount = async (eventName) => {
+            const result = await executeMixpanelTool('mixpanel_segmentation', {
+              event: eventName, from_date: fromDate, to_date: toDate,
+              type: 'unique', unit: 'month',
+            }, creds);
+            const values = result?.data?.values?.[eventName] ?? {};
+            return Object.values(values).reduce((sum, v) => sum + (Number(v) || 0), 0);
+          };
+
+          const resolved = await resolveAllIntents({ availableEvents: eventNames, intentDefs, queryUniqueCount });
+          resolvedIntentsStr = formatResolvedIntents(resolved);
+          console.log(`[IntentMapper] Resolved ${Object.keys(resolved).length} intent(s) for workspace ${workspace.workspace_id}`);
+        } catch (err) {
+          console.warn('[IntentMapper] Failed:', err.message);
+        }
+      }
+
       discoveryContext = [
         '\n\n--- PRE-LOADED MIXPANEL DATA (last 30 days) ---',
         projectTz ? `Project timezone: ${projectTz}` : '',
         dictSection,
+        resolvedIntentsStr || null,
         '',
         'Available events:',
         eventsStr,

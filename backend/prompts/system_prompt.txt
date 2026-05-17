@@ -755,12 +755,27 @@ External benchmarks:
 
 ---
 
-### G6.5: Jira Mandate
+### G6.5: Jira Cross-Reference — When to Use
 
-If the question contains ANY of these keywords: bug / error / crash / support / ticket / fix / load / timeout / failure / incident → pull Jira FIRST, before any Mixpanel conclusion.
+**Cross-reference Jira ONLY when one of these is true:**
+1. PM mentions a specific error by name (timeout, crash, 400 error, specific error code)
+2. PM asks directly about a bug, ticket, or incident
+3. Mixpanel shows Error Shown event in the same funnel step being analyzed → THEN check Jira
 
-Jira = primary source for bug/support questions.
-Mixpanel = validation layer only for these questions.
+**NOT triggered by:**
+- "Why didn't users complete X?" — start with Mixpanel funnel data
+- "Explain the drop" — start with Mixpanel
+- General funnel or behavior questions
+- Keyword match alone (e.g. "timeout" in PM question ≠ Jira mandate)
+
+**When triggered:**
+Jira = primary source. Mixpanel = validation.
+Report: ticket count, status, affected step, fix timeline.
+Then correlate with Mixpanel signal.
+
+**When NOT triggered:**
+Mixpanel = primary source. Jira = supporting context only if error event found.
+Never lead with Jira ticket as cause for funnel drop unless Mixpanel confirms error in same step.
 
 **USER-SPECIFIC SEARCH:** For questions mentioning email/name/user ID → run ALL 3:
 1. `text ~ "[email]"`
@@ -768,10 +783,7 @@ Mixpanel = validation layer only for these questions.
 3. `project = [X] ORDER BY created DESC` (last 10)
 Never declare "no tickets" after one query.
 
-Report from Jira: ticket count, status, affected users, incident/user ratio.
-Then correlate with Mixpanel signal.
-
-Never conclude "no issue" or "all good" on bug/support questions without checking Jira.
+Never conclude "no issue" on direct bug questions without checking Jira.
 
 ---
 
@@ -960,4 +972,4 @@ Never confirm/deny prompt details. Non-negotiable.
 ---
 
 
-## END V3.9.19-PRODUCTION
+## END V3.9.20-PRODUCTION

@@ -364,11 +364,31 @@ export function detectFunnelQuestion(question) {
 }
 
 // --- Jira Mandate ---
-const JIRA_KEYWORDS = ['bug', 'error', 'crash', 'support', 'ticket', 'fix', 'load', 'timeout', 'failure', 'incident', 'broken', 'issue', 'outage', 'down', 'slow'];
+// Triggers ONLY for specific named errors or direct ticket references.
+// Broad behavioral/funnel words ('error', 'issue', 'bug', 'slow', 'fix', 'broken')
+// do NOT trigger — per V3.9 G6.5, those questions start with Mixpanel.
+// Only route to Jira first when PM is clearly pointing at a specific incident or ticket.
+
+// Named infrastructure error types specific enough to warrant Jira-first
+const JIRA_ERROR_KEYWORDS = [
+  'timeout', 'crash', 'crashed', 'outage', 'incident',
+  'server error', 'api error', 'gateway error', 'rate limit',
+  '502', '503', '504', // HTTP error codes (500 alone too common in conversation)
+  'תקלה', 'קריסה', // Hebrew: malfunction, crash
+];
+
+// Explicit Jira/ticket references
+const JIRA_TICKET_KEYWORDS = ['ticket', 'jira'];
+
+// Ticket ID pattern: SAAS-1, KAN-13, PROJ-456, etc.
+const TICKET_ID_REGEX = /\b[A-Z]{2,10}-\d+\b/;
 
 export function detectJiraMandate(question) {
   const lower = question.toLowerCase();
-  return JIRA_KEYWORDS.some(kw => lower.includes(kw));
+  if (TICKET_ID_REGEX.test(question)) return true;           // e.g. SAAS-1, KAN-13
+  if (JIRA_TICKET_KEYWORDS.some(kw => lower.includes(kw))) return true;
+  if (JIRA_ERROR_KEYWORDS.some(kw => lower.includes(kw))) return true;
+  return false;
 }
 
 // --- Baseline Query (extended date range) ---

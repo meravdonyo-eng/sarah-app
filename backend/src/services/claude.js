@@ -392,6 +392,209 @@ function purgeStaleJiraResults(history) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Funnel step focus detection + step-scoped context builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect whether the question is specifically about a single funnel step.
+ * Scores each step from pre-loaded funnel results against question tokens.
+ * Returns the best-matching step metadata, or null if no specific step found.
+ *
+ * Returned object:
+ *   { funnelName, stepIndex, stepName, stepEvent,
+ *     prevStepEvent, nextStepEvent, allFunnelStepEvents, totalInFunnel }
+ */
+function detectFunnelStepFocus(question, prefetchedFunnels) {
+  if (!prefetchedFunnels || prefetchedFunnels.length === 0) return null;
+
+  const qLower = question.toLowerCase();
+
+  // Collect every step from every pre-loaded funnel result
+  const allSteps = [];
+  for (const f of prefetchedFunnels) {
+    const steps =
+      f.data?.steps ??
+      (f.data && typeof f.data === 'object'
+        ? Object.values(f.data)[0]?.steps
+        : null) ??
+      [];
+    if (!Array.isArray(steps) || steps.length === 0) continue;
+
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      const stepName  = s.step_label ?? s.event ?? `Step ${i + 1}`;
+      const stepEvent = s.event ?? s.step_label ?? `Step ${i + 1}`;
+      allSteps.push({
+        funnelName:           f._funnel_name ?? 'Unknown funnel',
+        stepIndex:            i,
+        stepName,
+        stepEvent,
+        prevStepEvent:        i > 0 ? (steps[i - 1].event ?? steps[i - 1].step_label ?? null) : null,
+        nextStepEvent:        i < steps.length - 1 ? (steps[i + 1].event ?? steps[i + 1].step_label ?? null) : null,
+        allFunnelStepEvents:  steps.map(s2 => s2.event ?? s2.step_label).filter(Boolean),
+        totalInFunnel:        steps.length,
+      });
+    }
+  }
+
+  if (allSteps.length === 0) return null;
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const step of allSteps) {
+    let score = 0;
+    const name = step.stepName.toLowerCase();
+    const evt  = step.stepEvent.toLowerCase().replace(/[_\s-]+/g, ' ');
+
+    // Full name / event match → strong signal
+    if (qLower.includes(name)) score += 40;
+    else if (qLower.includes(evt)) score += 35;
+
+    // Token-level match (each word > 3 chars in the step name)
+    const tokens = name.replace(/[_-]/g, ' ').split(/\s+/).filter(t => t.length > 3);
+    for (const token of tokens) {
+      if (qLower.includes(token)) score += 15;
+    }
+
+    // The first funnel step is almost never "the drop step" — slight penalty
+    if (step.stepIndex === 0) score -= 5;
+
+    if (score > bestScore) { bestScore = score; bestMatch = step; }
+  }
+
+  // Require at least one meaningful token match (15 pts = one 4-char token)
+  if (bestScore < 15) return null;
+
+  console.log(`[StepDetect] "${bestMatch.stepName}" (score=${bestScore}) in "${bestMatch.funnelName}"`);
+  return bestMatch;
+}
+
+/**
+ * Pre-fetch Error Shown and Jira ticket data scoped to a specific funnel step.
+ * Both queries run in parallel. Returns a compact string injected into the
+ * fresh system block so Sarah only receives data relevant to the asked step.
+ *
+ * Error Shown: confirmed via funnel [prevStepEvent → Error Shown] — this is the
+ *   G5-required step-level confirmation, not just date-range overlap.
+ * Jira: JQL text search limited to step-name tokens (+ default project if set).
+ */
+async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate) {
+  const header = [
+    `=== STEP-SCOPED CONTEXT: this question is specifically about "${stepFocus.stepName}" ===`,
+    `Funnel: ${stepFocus.funnelName} | Step ${stepFocus.stepIndex + 1} of ${stepFocus.totalInFunnel}`,
+  ];
+
+  const [errorResult, jiraResult] = await Promise.allSettled([
+
+    // ── Error Shown: run funnel [prevStep → Error Shown] to confirm it fires HERE ──
+    (async () => {
+      if (!workspace.mixpanel_project_id || !stepFocus.prevStepEvent) return null;
+      const r = await executeTool('mixpanel_funnel', {
+        events: [stepFocus.prevStepEvent, 'Error Shown'],
+        from_date: fromDate,
+        to_date: toDate,
+        conversion_window: 604800, // 7 days in seconds
+      }, workspace);
+      const steps =
+        r?.data?.steps ??
+        (r?.data && typeof r.data === 'object' ? Object.values(r.data)[0]?.steps : null) ??
+        [];
+      if (steps.length < 2) return null;
+      return typeof steps[1]?.count === 'number'
+        ? steps[1].count
+        : (steps[1]?.unique_count ?? 0);
+    })(),
+
+    // ── Jira: search tickets whose text matches step-name tokens ──
+    (async () => {
+      if (!isJiraValid(workspace)) return null;
+      const tokens = stepFocus.stepName
+        .toLowerCase()
+        .replace(/[_-]/g, ' ')
+        .split(/\s+/)
+        .filter(t => t.length > 3)
+        .slice(0, 3); // cap at 3 tokens to keep JQL readable
+      if (tokens.length === 0) return null;
+
+      const textClauses = tokens.map(t => `text ~ "${t}"`).join(' AND ');
+      const projectClause = workspace.jira_default_project
+        ? ` AND project = "${workspace.jira_default_project}"`
+        : '';
+      const jql = `${textClauses}${projectClause} ORDER BY updated DESC`;
+
+      const r = await executeTool('jira_search_issues', { jql, max_results: 5 }, workspace);
+      return r?.issues ?? (Array.isArray(r) ? r : []);
+    })(),
+  ]);
+
+  const lines = [...header, ''];
+
+  // ── Format Error Shown result ──
+  if (!stepFocus.prevStepEvent) {
+    lines.push('ERROR SHOWN AT THIS STEP: Cannot confirm — this is the first funnel step (no preceding entry event).');
+  } else if (errorResult.status === 'fulfilled' && errorResult.value !== null) {
+    const count = errorResult.value;
+    if (count > 0) {
+      lines.push(`ERROR SHOWN AT THIS STEP (funnel confirmed): ${count.toLocaleString()} users hit "Error Shown" after "${stepFocus.prevStepEvent}" within the 7-day conversion window.`);
+    } else {
+      lines.push(`ERROR SHOWN AT THIS STEP: 0 users — Error Shown did NOT fire between "${stepFocus.prevStepEvent}" and "${stepFocus.stepName}" (funnel confirmed zero).`);
+    }
+  } else {
+    lines.push('ERROR SHOWN AT THIS STEP: Query unavailable — could not confirm.');
+  }
+
+  lines.push('');
+
+  // ── Format Jira result ──
+  if (!isJiraValid(workspace)) {
+    lines.push('JIRA TICKETS FOR THIS STEP: Jira not connected.');
+  } else {
+    const issues = jiraResult.status === 'fulfilled' && Array.isArray(jiraResult.value)
+      ? jiraResult.value
+      : null;
+
+    if (issues === null) {
+      lines.push(`JIRA TICKETS FOR THIS STEP: Query unavailable.`);
+    } else if (issues.length === 0) {
+      lines.push(`JIRA TICKETS FOR THIS STEP: No tickets found matching "${stepFocus.stepName}".`);
+    } else {
+      lines.push(`JIRA TICKETS FOR THIS STEP (${issues.length} found):`);
+      for (const issue of issues) {
+        const id       = issue.key ?? issue.id;
+        const summary  = issue.fields?.summary ?? issue.summary ?? '(no summary)';
+        const status   = issue.fields?.status?.name ?? issue.status ?? '?';
+        const priority = issue.fields?.priority?.name ?? issue.priority ?? '?';
+        lines.push(`  ${id}: ${summary} [${status}, ${priority}]`);
+      }
+    }
+  }
+
+  // ── No-data summary ──
+  const hasErrors = errorResult.status === 'fulfilled' &&
+    errorResult.value !== null &&
+    errorResult.value > 0;
+  const hasTickets = jiraResult.status === 'fulfilled' &&
+    Array.isArray(jiraResult.value) &&
+    jiraResult.value.length > 0;
+
+  if (!hasErrors && !hasTickets) {
+    lines.push('', '⚠ No errors or tickets found for this specific step.');
+  }
+
+  lines.push(
+    '',
+    'STEP ISOLATION — MANDATORY:',
+    `  • Only cite data shown above for "${stepFocus.stepName}"`,
+    '  • Do NOT cite Error Shown events or Jira tickets from other funnel steps — they are not in this context',
+    '  • If a ticket or error event belongs to a different step, do not mention it at all',
+    '=== END STEP-SCOPED CONTEXT ===',
+  );
+
+  return lines.join('\n');
+}
+
 // --- Funnel Mandate: step-to-step conversion questions must use mixpanel_funnel ---
 const FUNNEL_KEYWORDS = [
   'funnel', 'conversion', 'converted', 'drop', 'drop-off', 'dropoff', 'dropout',
@@ -627,6 +830,11 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   // Pre-fetch Mixpanel discovery data and inject into system prompt.
   // This eliminates 2 mandatory Claude tool-call iterations (~8s) per question.
   let discoveryContext = '';
+  // hoistedFunnels: filled inside the Mixpanel prefetch block, then consumed by
+  // the step-scoped context builder (which runs after the prefetch try/catch).
+  let hoistedFunnels = [];
+  const prefetchFromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const prefetchToDate   = new Date().toISOString().split('T')[0];
   const hasMixpanel = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
   // Skip Mixpanel prefetch for pure Jira questions (ticket/bug lookups have no use for events/funnels).
   // Saves ~3,000 tokens × N tool-loop iterations for questions like "show open P1 tickets".
@@ -661,6 +869,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         Array.isArray(funnels) ? funnels : [],
         workspace
       );
+      hoistedFunnels = prefetchedFunnels; // expose for step-scoped context (built after this block)
       // Format funnel results as a compact table (~40 tokens/funnel vs ~300 tokens JSON).
       // Still cap at 3000 chars as a safety net in case formatFunnelAsTable falls back to JSON.
       const MAX_FUNNEL_CHARS = 3000;
@@ -746,14 +955,34 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }
   }
 
+  // Step-scoped context: if the question targets a specific funnel step, pre-fetch
+  // Error Shown confirmation and Jira tickets scoped to THAT step only.
+  // Goes in the fresh block (block 3) — changes per question so cannot be cached.
+  // This removes adjacent-step data from Sarah's context, preventing citation leakage.
+  let stepScopedContext = '';
+  if (detectFunnelQuestion(userMessage) && hoistedFunnels.length > 0) {
+    const stepFocus = detectFunnelStepFocus(userMessage, hoistedFunnels);
+    if (stepFocus) {
+      try {
+        stepScopedContext = await buildStepScopedContext(
+          stepFocus, workspace, prefetchFromDate, prefetchToDate
+        );
+        console.log(`[StepContext] Injected step-scoped context for "${stepFocus.stepName}"`);
+      } catch (err) {
+        console.warn('[StepContext] Failed to build step-scoped context:', err.message);
+      }
+    }
+  }
+
   // System prompt split into 3 blocks for maximum cache efficiency:
   //  Block 1 (static)    — full system prompt file, ~7k tokens, never changes → always cached
   //  Block 2 (discovery) — events + funnel defs + prefetched results, ~1-2k tokens,
   //                        stable for 10 min (matches discovery cache TTL) → cached between
   //                        tool-loop iterations and follow-up questions within 5 min
-  //  Block 3 (fresh)     — datetime, connected dashboards, per-message addons → always fresh
+  //  Block 3 (fresh)     — datetime, connected dashboards, per-message addons,
+  //                        step-scoped context (per-question) → always fresh, never cached
   const staticSystemText = basePrompt;
-  const freshSystemText = [dynamicHeader, messageAddons].filter(Boolean).join('\n\n');
+  const freshSystemText = [dynamicHeader, messageAddons, stepScopedContext].filter(Boolean).join('\n\n');
 
   const systemBlocks = [
     {

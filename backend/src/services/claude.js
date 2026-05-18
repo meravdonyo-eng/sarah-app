@@ -480,123 +480,58 @@ function detectFunnelStepFocus(question, prefetchedFunnels) {
  *   G5-required step-level confirmation, not just date-range overlap.
  * Jira: JQL text search limited to step-name tokens (+ default project if set).
  */
-async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate, question) {
-  // Gate: only fetch Jira when the question explicitly references bugs, errors, or tickets.
-  // General funnel questions ("why did users drop", "explain conversion") → no Jira data.
-  const includeJira = shouldInjectJiraContext(question);
+async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate) {
+  // Jira tickets are NOT pre-loaded here. Sarah calls jira_search_issues herself
+  // when G6.5 criteria are met. Pre-loading tickets caused adjacent-step citation leakage.
+  // This function only pre-fetches the Mixpanel Error Shown confirmation for the step.
 
-  const header = [
+  const lines = [
     `=== STEP-SCOPED CONTEXT: this question is specifically about "${stepFocus.stepName}" ===`,
     `Funnel: ${stepFocus.funnelName} | Step ${stepFocus.stepIndex + 1} of ${stepFocus.totalInFunnel}`,
+    '',
   ];
 
-  const [errorResult, jiraResult] = await Promise.allSettled([
-
-    // ── Error Shown: run funnel [prevStep → Error Shown] to confirm it fires HERE ──
-    (async () => {
-      if (!workspace.mixpanel_project_id || !stepFocus.prevStepEvent) return null;
+  // ── Error Shown: confirm via funnel [prevStep → Error Shown] that it fires HERE ──
+  try {
+    if (workspace.mixpanel_project_id && stepFocus.prevStepEvent) {
       const r = await executeTool('mixpanel_funnel', {
         events: [stepFocus.prevStepEvent, 'Error Shown'],
         from_date: fromDate,
         to_date: toDate,
-        conversion_window: 604800, // 7 days in seconds
+        conversion_window: 604800,
       }, workspace);
       const steps =
         r?.data?.steps ??
         (r?.data && typeof r.data === 'object' ? Object.values(r.data)[0]?.steps : null) ??
         [];
-      if (steps.length < 2) return null;
-      return typeof steps[1]?.count === 'number'
-        ? steps[1].count
-        : (steps[1]?.unique_count ?? 0);
-    })(),
-
-    // ── Jira: only fetch when question explicitly asks about bugs/errors/tickets ──
-    (async () => {
-      if (!includeJira || !isJiraValid(workspace)) return null;
-      const tokens = stepFocus.stepName
-        .toLowerCase()
-        .replace(/[_-]/g, ' ')
-        .split(/\s+/)
-        .filter(t => t.length > 3)
-        .slice(0, 3); // cap at 3 tokens to keep JQL readable
-      if (tokens.length === 0) return null;
-
-      const textClauses = tokens.map(t => `text ~ "${t}"`).join(' AND ');
-      const projectClause = workspace.jira_default_project
-        ? ` AND project = "${workspace.jira_default_project}"`
-        : '';
-      const jql = `${textClauses}${projectClause} ORDER BY updated DESC`;
-
-      const r = await executeTool('jira_search_issues', { jql, max_results: 5 }, workspace);
-      return r?.issues ?? (Array.isArray(r) ? r : []);
-    })(),
-  ]);
-
-  const lines = [...header, ''];
-
-  // ── Format Error Shown result ──
-  if (!stepFocus.prevStepEvent) {
-    lines.push('ERROR SHOWN AT THIS STEP: Cannot confirm — this is the first funnel step (no preceding entry event).');
-  } else if (errorResult.status === 'fulfilled' && errorResult.value !== null) {
-    const count = errorResult.value;
-    if (count > 0) {
-      lines.push(`ERROR SHOWN AT THIS STEP (funnel confirmed): ${count.toLocaleString()} users hit "Error Shown" after "${stepFocus.prevStepEvent}" within the 7-day conversion window.`);
-    } else {
-      lines.push(`ERROR SHOWN AT THIS STEP: 0 users — Error Shown did NOT fire between "${stepFocus.prevStepEvent}" and "${stepFocus.stepName}" (funnel confirmed zero).`);
-    }
-  } else {
-    lines.push('ERROR SHOWN AT THIS STEP: Query unavailable — could not confirm.');
-  }
-
-  lines.push('');
-
-  // ── Format Jira result ──
-  if (!includeJira) {
-    // Question did not ask about bugs/errors/tickets — withhold Jira data entirely
-    lines.push('JIRA TICKETS: Not loaded — question does not reference bugs, errors, or tickets. If you need ticket data, ask Sarah explicitly.');
-  } else if (!isJiraValid(workspace)) {
-    lines.push('JIRA TICKETS FOR THIS STEP: Jira not connected.');
-  } else {
-    const issues = jiraResult.status === 'fulfilled' && Array.isArray(jiraResult.value)
-      ? jiraResult.value
-      : null;
-
-    if (issues === null) {
-      lines.push('JIRA TICKETS FOR THIS STEP: Query unavailable.');
-    } else if (issues.length === 0) {
-      lines.push(`JIRA TICKETS FOR THIS STEP: No tickets found matching "${stepFocus.stepName}".`);
-    } else {
-      lines.push(`JIRA TICKETS FOR THIS STEP (${issues.length} found):`);
-      for (const issue of issues) {
-        const id       = issue.key ?? issue.id;
-        const summary  = issue.fields?.summary ?? issue.summary ?? '(no summary)';
-        const status   = issue.fields?.status?.name ?? issue.status ?? '?';
-        const priority = issue.fields?.priority?.name ?? issue.priority ?? '?';
-        lines.push(`  ${id}: ${summary} [${status}, ${priority}]`);
+      if (steps.length >= 2) {
+        const count = typeof steps[1]?.count === 'number'
+          ? steps[1].count
+          : (steps[1]?.unique_count ?? 0);
+        if (count > 0) {
+          lines.push(`ERROR SHOWN AT THIS STEP (funnel confirmed): ${count.toLocaleString()} users hit "Error Shown" after "${stepFocus.prevStepEvent}" within the 7-day conversion window.`);
+        } else {
+          lines.push(`ERROR SHOWN AT THIS STEP: 0 users — Error Shown did NOT fire between "${stepFocus.prevStepEvent}" and "${stepFocus.stepName}" (funnel confirmed zero).`);
+        }
+      } else {
+        lines.push('ERROR SHOWN AT THIS STEP: Query returned no step data.');
       }
+    } else if (!stepFocus.prevStepEvent) {
+      lines.push('ERROR SHOWN AT THIS STEP: Cannot confirm — this is the first funnel step.');
+    } else {
+      lines.push('ERROR SHOWN AT THIS STEP: Mixpanel not connected.');
     }
-  }
-
-  // ── No-data summary (only relevant when Jira was actually queried) ──
-  const hasErrors = errorResult.status === 'fulfilled' &&
-    errorResult.value !== null &&
-    errorResult.value > 0;
-  const hasTickets = includeJira &&
-    jiraResult.status === 'fulfilled' &&
-    Array.isArray(jiraResult.value) &&
-    jiraResult.value.length > 0;
-
-  if (!hasErrors && !hasTickets && includeJira) {
-    lines.push('', '⚠ No errors or tickets found for this specific step.');
+  } catch (err) {
+    lines.push('ERROR SHOWN AT THIS STEP: Query unavailable — could not confirm.');
+    console.warn(`[StepContext] Error Shown query failed: ${err.message}`);
   }
 
   lines.push(
     '',
     'STEP ISOLATION — MANDATORY:',
     `  • Only cite data shown above for "${stepFocus.stepName}"`,
-    '  • Do NOT cite Error Shown events or Jira tickets from other funnel steps — they are not in this context',
-    '  • If a ticket or error event belongs to a different step, do not mention it at all',
+    '  • Do NOT cite Error Shown from other funnel steps — they are not in this context',
+    '  • Jira tickets are NOT pre-loaded. Call jira_search_issues yourself if G6.5 criteria are met.',
     '=== END STEP-SCOPED CONTEXT ===',
   );
 
@@ -645,19 +580,6 @@ export function detectJiraMandate(question) {
   return false;
 }
 
-/**
- * Decide whether to pre-load Jira tickets into context for this question.
- * Broader than detectJiraMandate — also catches explicit "bug" / "error" mentions.
- * General funnel/behavioral questions ("why did users drop", "explain conversion")
- * return false so Sarah never receives unsolicited ticket data.
- */
-const JIRA_CONTEXT_EXTRA_KEYWORDS = ['bug', 'error'];
-
-function shouldInjectJiraContext(question) {
-  if (detectJiraMandate(question)) return true;
-  const lower = question.toLowerCase();
-  return JIRA_CONTEXT_EXTRA_KEYWORDS.some(kw => lower.includes(kw));
-}
 
 // --- Baseline Query (extended date range) ---
 const BASELINE_KEYWORDS = ['after fix', 'after the fix', 'after fixing', 'before and after', 'did it improve', 'did it help', 'impact of', 'effect of', 'since the fix', 'since we fixed', 'since deploying', 'post fix', 'post-fix', 'post deploy', 'after deploy', 'decrease in errors', 'increase in completion'];
@@ -987,7 +909,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     if (stepFocus) {
       try {
         stepScopedContext = await buildStepScopedContext(
-          stepFocus, workspace, prefetchFromDate, prefetchToDate, userMessage
+          stepFocus, workspace, prefetchFromDate, prefetchToDate
         );
         console.log(`[StepContext] Injected step-scoped context for "${stepFocus.stepName}"`);
       } catch (err) {

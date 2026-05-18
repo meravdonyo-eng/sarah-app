@@ -7,7 +7,7 @@ import pkg from '@slack/bolt';
 const { App, ExpressReceiver } = pkg;
 import { initDb, getWorkspace } from './services/db.js';
 import { decrypt } from './services/encryption.js';
-import { handleMessage, handleAppMention, handleAction, handleAppHomeOpened } from './slack/handlers.js';
+import { handleMessage, handleAppMention, handleAction, handleAppHomeOpened, handleSarahCommand, handleSarahSettingsSubmission } from './slack/handlers.js';
 import { startTokenRefreshDaemon } from './services/ownerAlerts.js';
 import oauthRouter from './routes/oauth.js';
 import agentRouter from './routes/agent.js';
@@ -59,6 +59,10 @@ slackApp.event('app_home_opened', async ({ event, client, context }) => {
     await handleAppHomeOpened({ event, client, context });
   }
 });
+
+// /sarah slash command + settings modal submission
+slackApp.command('/sarah', async (args) => { await handleSarahCommand(args); });
+slackApp.view('sarah_settings_modal', async (args) => { await handleSarahSettingsSubmission(args); });
 
 slackApp.error(async (error) => {
   console.error('[BOLT ERROR]', error.message, error.stack);

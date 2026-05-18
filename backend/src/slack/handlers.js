@@ -812,3 +812,173 @@ export async function handleAction({ action, ack, say, body, context, client }) 
     return;
   }
 }
+
+// ---------------------------------------------------------------------------
+// /sarah settings — slash command
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle /sarah slash command.
+ * /sarah settings  → opens a Settings modal
+ * /sarah           → same as /sarah settings
+ * anything else    → shows help
+ */
+export async function handleSarahCommand({ command, ack, client, context }) {
+  await ack();
+  const workspaceId = command.team_id || context.teamId;
+  const userId      = command.user_id;
+  const sub         = (command.text || '').trim().toLowerCase();
+
+  if (sub === 'settings' || sub === '') {
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      await client.chat.postEphemeral({
+        channel: command.channel_id, user: userId,
+        text: 'Sarah is not configured for this workspace. Please reinstall.',
+      });
+      return;
+    }
+
+    // Build status lines
+    const hasMixpanel = !!(workspace.mixpanel_project_id && workspace.mixpanel_username);
+    const hasJira     = isJiraValid(workspace);
+    let mpProjectId   = null;
+    if (hasMixpanel) {
+      try { mpProjectId = decrypt(workspace.mixpanel_project_id); } catch {}
+    }
+    const mixpanelLine = hasMixpanel
+      ? `✅ Mixpanel${mpProjectId ? ` (project ${mpProjectId})` : ''}`
+      : '❌ Mixpanel — not connected';
+    const jiraLine = hasJira
+      ? `✅ Jira${workspace.jira_cloud_id ? ` (${workspace.jira_cloud_id})` : ''}`
+      : '❌ Jira — not connected';
+
+    const rawDict = workspace.event_dictionary
+      ? (typeof workspace.event_dictionary === 'string'
+          ? JSON.parse(workspace.event_dictionary)
+          : workspace.event_dictionary)
+      : {};
+    const dictCount = Object.keys(rawDict).length;
+
+    const modal = {
+      type: 'modal',
+      callback_id: 'sarah_settings_modal',
+      title:  { type: 'plain_text', text: 'Sarah Settings' },
+      submit: { type: 'plain_text', text: 'Save'           },
+      close:  { type: 'plain_text', text: 'Close'          },
+      private_metadata: JSON.stringify({ workspaceId, channelId: command.channel_id }),
+      blocks: [
+        // ── Connected tools (read-only) ──────────────────────────────────
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: `*Connected tools*\n${mixpanelLine}\n${jiraLine}` },
+        },
+        {
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: 'Type `connect mixpanel` or `connect jira` in chat to connect or reconnect.' }],
+        },
+        { type: 'divider' },
+        // ── Default Jira project (editable) ─────────────────────────────
+        {
+          type: 'input',
+          optional: true,
+          block_id: 'jira_project_block',
+          label: { type: 'plain_text', text: 'Default Jira project key' },
+          hint:  { type: 'plain_text', text: 'Sarah adds project = "KEY" to all Jira queries. Leave blank to search across all projects.' },
+          element: {
+            type: 'plain_text_input',
+            action_id: 'jira_project_input',
+            initial_value: workspace.jira_default_project || '',
+            placeholder: { type: 'plain_text', text: 'e.g. SAAS' },
+          },
+        },
+        { type: 'divider' },
+        // ── Event dictionary (read-only summary) ─────────────────────────
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Event dictionary* — ${dictCount === 0 ? 'empty' : `${dictCount} ${dictCount === 1 ? 'entry' : 'entries'}`}\n` +
+              (dictCount > 0
+                ? 'Type `show event dictionary` to view · `set event [name] = [description]` to add'
+                : 'Type `set event [name] = [description]` to add your first entry.'),
+          },
+        },
+        { type: 'divider' },
+        // ── Conversation reset (instruction only) ────────────────────────
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: '*Conversation*\nType `reset` in chat to clear Sarah\'s conversation memory.' },
+        },
+      ],
+    };
+
+    try {
+      await client.views.open({ trigger_id: command.trigger_id, view: modal });
+    } catch (err) {
+      // Fallback: post ephemeral text if modal fails (e.g. trigger_id expired)
+      console.warn('[Settings] Modal open failed, posting ephemeral fallback:', err.message);
+      await client.chat.postEphemeral({
+        channel: command.channel_id,
+        user: userId,
+        text: [
+          '*Sarah Settings*',
+          mixpanelLine, jiraLine,
+          '',
+          `*Default Jira project:* ${workspace.jira_default_project || 'none (all projects)'}`,
+          `*Event dictionary:* ${dictCount} ${dictCount === 1 ? 'entry' : 'entries'}`,
+          '',
+          '_Type `set jira project KEY` to change default project._',
+          '_Type `connect mixpanel` / `connect jira` to manage connections._',
+        ].join('\n'),
+      });
+    }
+    return;
+  }
+
+  // Unknown sub-command → help
+  await client.chat.postEphemeral({
+    channel: command.channel_id,
+    user: userId,
+    text: 'Available commands:\n• `/sarah settings` — open Sarah settings\n• `/sarah` — same as `/sarah settings`',
+  });
+}
+
+/**
+ * Handle modal submission from /sarah settings.
+ * Currently saves: default Jira project key.
+ */
+export async function handleSarahSettingsSubmission({ ack, view, body, client }) {
+  await ack();
+  let workspaceId, channelId;
+  try {
+    ({ workspaceId, channelId } = JSON.parse(view.private_metadata || '{}'));
+  } catch { return; }
+  if (!workspaceId) return;
+
+  const userId    = body.user?.id;
+  const rawKey    = view.state.values?.jira_project_block?.jira_project_input?.value;
+  const projectKey = (rawKey || '').trim().toUpperCase() || null;
+
+  try {
+    await updateWorkspaceJiraProject(workspaceId, projectKey);
+  } catch (err) {
+    console.error('[Settings] Failed to save project key:', err.message);
+    return;
+  }
+
+  const msg = projectKey
+    ? `✅ Settings saved — default Jira project set to *${projectKey}*.`
+    : '✅ Settings saved — default Jira project cleared (Sarah will search all projects).';
+
+  // Try ephemeral in original channel; fall back to DM if channel unavailable
+  const postTarget = async (channel) =>
+    client.chat.postEphemeral({ channel, user: userId, text: msg });
+
+  try {
+    if (channelId) await postTarget(channelId);
+    else           await client.chat.postMessage({ channel: userId, text: msg });
+  } catch {
+    try { await client.chat.postMessage({ channel: userId, text: msg }); } catch { /* non-critical */ }
+  }
+}

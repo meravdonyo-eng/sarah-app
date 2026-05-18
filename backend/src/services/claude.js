@@ -480,7 +480,11 @@ function detectFunnelStepFocus(question, prefetchedFunnels) {
  *   G5-required step-level confirmation, not just date-range overlap.
  * Jira: JQL text search limited to step-name tokens (+ default project if set).
  */
-async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate) {
+async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate, question) {
+  // Gate: only fetch Jira when the question explicitly references bugs, errors, or tickets.
+  // General funnel questions ("why did users drop", "explain conversion") → no Jira data.
+  const includeJira = shouldInjectJiraContext(question);
+
   const header = [
     `=== STEP-SCOPED CONTEXT: this question is specifically about "${stepFocus.stepName}" ===`,
     `Funnel: ${stepFocus.funnelName} | Step ${stepFocus.stepIndex + 1} of ${stepFocus.totalInFunnel}`,
@@ -507,9 +511,9 @@ async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate) {
         : (steps[1]?.unique_count ?? 0);
     })(),
 
-    // ── Jira: search tickets whose text matches step-name tokens ──
+    // ── Jira: only fetch when question explicitly asks about bugs/errors/tickets ──
     (async () => {
-      if (!isJiraValid(workspace)) return null;
+      if (!includeJira || !isJiraValid(workspace)) return null;
       const tokens = stepFocus.stepName
         .toLowerCase()
         .replace(/[_-]/g, ' ')
@@ -548,7 +552,10 @@ async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate) {
   lines.push('');
 
   // ── Format Jira result ──
-  if (!isJiraValid(workspace)) {
+  if (!includeJira) {
+    // Question did not ask about bugs/errors/tickets — withhold Jira data entirely
+    lines.push('JIRA TICKETS: Not loaded — question does not reference bugs, errors, or tickets. If you need ticket data, ask Sarah explicitly.');
+  } else if (!isJiraValid(workspace)) {
     lines.push('JIRA TICKETS FOR THIS STEP: Jira not connected.');
   } else {
     const issues = jiraResult.status === 'fulfilled' && Array.isArray(jiraResult.value)
@@ -556,7 +563,7 @@ async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate) {
       : null;
 
     if (issues === null) {
-      lines.push(`JIRA TICKETS FOR THIS STEP: Query unavailable.`);
+      lines.push('JIRA TICKETS FOR THIS STEP: Query unavailable.');
     } else if (issues.length === 0) {
       lines.push(`JIRA TICKETS FOR THIS STEP: No tickets found matching "${stepFocus.stepName}".`);
     } else {
@@ -571,15 +578,16 @@ async function buildStepScopedContext(stepFocus, workspace, fromDate, toDate) {
     }
   }
 
-  // ── No-data summary ──
+  // ── No-data summary (only relevant when Jira was actually queried) ──
   const hasErrors = errorResult.status === 'fulfilled' &&
     errorResult.value !== null &&
     errorResult.value > 0;
-  const hasTickets = jiraResult.status === 'fulfilled' &&
+  const hasTickets = includeJira &&
+    jiraResult.status === 'fulfilled' &&
     Array.isArray(jiraResult.value) &&
     jiraResult.value.length > 0;
 
-  if (!hasErrors && !hasTickets) {
+  if (!hasErrors && !hasTickets && includeJira) {
     lines.push('', '⚠ No errors or tickets found for this specific step.');
   }
 
@@ -635,6 +643,20 @@ export function detectJiraMandate(question) {
   if (JIRA_TICKET_KEYWORDS.some(kw => lower.includes(kw))) return true;
   if (JIRA_ERROR_KEYWORDS.some(kw => lower.includes(kw))) return true;
   return false;
+}
+
+/**
+ * Decide whether to pre-load Jira tickets into context for this question.
+ * Broader than detectJiraMandate — also catches explicit "bug" / "error" mentions.
+ * General funnel/behavioral questions ("why did users drop", "explain conversion")
+ * return false so Sarah never receives unsolicited ticket data.
+ */
+const JIRA_CONTEXT_EXTRA_KEYWORDS = ['bug', 'error'];
+
+function shouldInjectJiraContext(question) {
+  if (detectJiraMandate(question)) return true;
+  const lower = question.toLowerCase();
+  return JIRA_CONTEXT_EXTRA_KEYWORDS.some(kw => lower.includes(kw));
 }
 
 // --- Baseline Query (extended date range) ---
@@ -965,7 +987,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     if (stepFocus) {
       try {
         stepScopedContext = await buildStepScopedContext(
-          stepFocus, workspace, prefetchFromDate, prefetchToDate
+          stepFocus, workspace, prefetchFromDate, prefetchToDate, userMessage
         );
         console.log(`[StepContext] Injected step-scoped context for "${stepFocus.stepName}"`);
       } catch (err) {

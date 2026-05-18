@@ -14,6 +14,7 @@ import {
   getTotalMonthlyUsage,
   addEventToDictionary,
   updateWorkspaceEventDictionary,
+  updateWorkspaceSystemPrompt,
 } from '../services/db.js';
 import { sendOwnerAlert, checkApibudget } from '../services/ownerAlerts.js';
 import {
@@ -200,6 +201,59 @@ export async function handleMessage({ message, say, client, context }) {
       const lines = entries.map(([k, v]) => `• \`${k}\` = ${v}`).join('\n');
       await say({ text: `*Event Dictionary* (${entries.length} entries):\n${lines}` });
     }
+    return;
+  }
+
+  // --- !setprompt command (owner-only hot-reload, no deploy needed) ---
+  // Usage: send a message where the first line is "!setprompt" and the rest is the new prompt.
+  // Only OWNER_SLACK_USER_ID can run this — prevents any workspace member from replacing the prompt.
+  if (lower.startsWith('!setprompt')) {
+    const ownerId = process.env.OWNER_SLACK_USER_ID;
+    if (!ownerId || userId !== ownerId) {
+      await say({ text: '❌ `!setprompt` is restricted to the workspace owner.' });
+      return;
+    }
+    // The prompt body is everything after the first line
+    const firstNewline = text.indexOf('\n');
+    const promptText = firstNewline >= 0 ? text.slice(firstNewline + 1).trim() : '';
+    if (!promptText) {
+      await say({
+        text: [
+          '❌ No prompt text found.',
+          'Usage: send a message where line 1 is `!setprompt` and the rest is the full prompt.',
+          '```',
+          '!setprompt',
+          'Sarah — Product Intelligence Partner ...',
+          '...',
+          '```',
+          'To *clear* the custom prompt (revert to deploy default): send `!setprompt clear`',
+        ].join('\n'),
+      });
+      return;
+    }
+    // "!setprompt clear" → wipe the DB entry and revert to the deployed file prompt
+    if (promptText.toLowerCase() === 'clear') {
+      await updateWorkspaceSystemPrompt(workspaceId, null);
+      await say({ text: '✅ Custom prompt cleared. Sarah will now use the deployed default prompt.' });
+      return;
+    }
+    await updateWorkspaceSystemPrompt(workspaceId, promptText);
+    const PREVIEW_LEN = 120;
+    const preview = promptText.length > PREVIEW_LEN
+      ? promptText.slice(0, PREVIEW_LEN) + '...'
+      : promptText;
+    await say({
+      text: [
+        `✅ Prompt updated (${promptText.length.toLocaleString()} chars). Takes effect on the *next message* — no deploy needed.`,
+        '',
+        'Preview:',
+        '```',
+        preview,
+        '```',
+        '',
+        '_To revert to the deployed prompt, send `!setprompt clear`._',
+      ].join('\n'),
+    });
     return;
   }
 

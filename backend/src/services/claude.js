@@ -349,6 +349,49 @@ function sanitizeHistory(history) {
   return compacted.slice(start);
 }
 
+/**
+ * Strip Jira tool-use/tool-result exchange pairs from history when the current
+ * question is not Jira-related. Prevents session contamination where Jira ticket
+ * data from a previous turn biases funnel/behavioral answers.
+ *
+ * Strategy:
+ *   1. Collect IDs of all jira_* tool_use blocks in assistant turns.
+ *   2. Remove assistant turns that ONLY contain those tool_use blocks (no text output).
+ *   3. Remove user turns whose content consists entirely of tool_result blocks
+ *      matching those IDs.
+ * Orphaned blocks are cleaned up by the subsequent sanitizeHistory() call.
+ */
+function purgeStaleJiraResults(history) {
+  // Identify jira tool_use IDs from assistant messages
+  const jiraToolUseIds = new Set();
+  for (const msg of history) {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === 'tool_use' && block.name?.startsWith('jira_')) {
+        jiraToolUseIds.add(block.id);
+      }
+    }
+  }
+  if (jiraToolUseIds.size === 0) return history; // nothing to purge
+
+  return history.filter(msg => {
+    // Remove assistant turn that ONLY contains jira tool_use (no text reply yet)
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      const hasText = msg.content.some(c => c.type === 'text');
+      const hasNonJiraTool = msg.content.some(c => c.type === 'tool_use' && !c.name?.startsWith('jira_'));
+      if (!hasText && !hasNonJiraTool) return false; // pure jira tool_use turn → drop
+    }
+    // Remove user turn that ONLY contains jira tool_result blocks
+    if (msg.role === 'user' && Array.isArray(msg.content)) {
+      const usefulBlocks = msg.content.filter(
+        c => c.type !== 'tool_result' || !jiraToolUseIds.has(c.tool_use_id)
+      );
+      if (usefulBlocks.length === 0) return false; // all blocks are stale jira results → drop
+    }
+    return true;
+  });
+}
+
 // --- Funnel Mandate: step-to-step conversion questions must use mixpanel_funnel ---
 const FUNNEL_KEYWORDS = [
   'funnel', 'conversion', 'converted', 'drop', 'drop-off', 'dropoff', 'dropout',
@@ -576,7 +619,8 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
   // Static prompt — no per-request substitutions so Anthropic cache always hits.
   // Dynamic values (datetime, dashboards, events) are in dynamicHeader / discoveryContext.
-  const basePrompt = readGlobalPrompt() || buildSystemPrompt(workspace);
+  // Priority: DB workspace.system_prompt (hot-reload, no deploy) → file → hardcoded fallback.
+  const basePrompt = workspace.system_prompt || readGlobalPrompt() || buildSystemPrompt(workspace);
 
   const messageAddons = buildMessageAddons(userMessage);
 
@@ -732,7 +776,20 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     text: freshSystemText, // datetime + dashboards — always fresh, not cached
   });
 
-  const sanitizedHistory = sanitizeHistory(conversationHistory);
+  let sanitizedHistory = sanitizeHistory(conversationHistory);
+  // Strip stale Jira tool results when the current question is funnel/behavioral.
+  // Prevents session contamination: Jira ticket data from a previous turn biasing
+  // funnel answers ("why did users drop") with irrelevant ticket numbers.
+  if (!detectJiraMandate(userMessage)) {
+    const before = sanitizedHistory.length;
+    sanitizedHistory = purgeStaleJiraResults(sanitizedHistory);
+    // Re-sanitize to clean up any orphaned blocks left after the purge
+    sanitizedHistory = sanitizeHistory(sanitizedHistory);
+    const removed = before - sanitizedHistory.length;
+    if (removed > 0) {
+      console.log(`[HistoryPurge] Stripped ${removed} stale Jira history entries for non-Jira question`);
+    }
+  }
   // Track where current-turn messages start (after history + current user msg)
   const currentTurnStartIdx = sanitizedHistory.length + 1;
 

@@ -1,0 +1,47 @@
+{
+  "_comment": "Default intent definitions — used when workspace has no event_dictionary configured with intents. PM can override per-workspace via the admin UI (event_dictionary column). Workspace intents always take priority over these defaults.",
+  "intents": {
+    "active_user": {
+      "description": "Any user who opened the app or had a session (most common event, highest volume)",
+      "characteristics": {
+        "expected_volume": "highest_unique_users",
+        "timing": "session_start",
+        "look_for_name_containing": [
+          "session", "open", "start", "launch", "foreground",
+          "view", "visit", "load", "active", "init", "app_open"
+        ],
+        "avoid_if_name_contains": [
+          "signup", "sign_up", "register", "purchase", "payment",
+          "email", "notification", "push", "error", "crash"
+        ]
+      }
+    },
+    "activated_user": {
+      "description": "User who completed the activation milestone — first value moment or onboarding completion",
+      "characteristics": {
+        "timing": "after_onboarding",
+        "look_for_name_containing": [
+          "activat", "complet", "onboard", "milestone",
+          "first_value", "graduate", "done", "finish",
+          "convert", "success"
+        ],
+        "avoid_if_name_contains": [
+          "start", "begin", "init", "view", "open", "session"
+        ]
+      }
+    },
+    "retained_user": {
+      "description": "User who returned after their first session — second visit or repeat engagement",
+      "characteristics": {
+        "timing": "return_visit",
+        "look_for_name_containing": [
+          "return", "revisit", "back", "session_2", "repeat",
+          "reopen", "re_open", "second", "recurring"
+        ],
+        "avoid_if_name_contains": [
+          "first", "new", "signup", "register", "onboard"
+        ]
+      }
+    }
+  }
+}

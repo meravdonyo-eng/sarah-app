@@ -282,7 +282,11 @@ async function executeTool(toolName, args, workspace) {
     const resultCacheKey = `${workspace.workspace_id}:${toolName}:${argsKey}`;
 
     try {
-      const result = await executeMixpanelTool(toolName, args, creds);
+      const rawResult = await executeMixpanelTool(toolName, args, creds);
+      // Annotate with _source: 'live' so Sarah can cite "From Mixpanel (live):" and use Confirmed.
+      const result = Array.isArray(rawResult)
+        ? { data: rawResult, _source: 'live' }
+        : { ...rawResult, _source: 'live' };
       // Persist successful result so we can serve it as a fallback if future calls fail
       mixpanelResultCache.set(resultCacheKey, { result, storedAt: Date.now(), expiresAt: Date.now() + RESULT_CACHE_TTL_MS });
       return result;
@@ -619,8 +623,21 @@ function buildMessageAddons(userMessage) {
 
 function buildDynamicHeader(workspace) {
   const now = new Date();
+  const fmt = (d) => d.toISOString().split('T')[0];
+  const subDays = (d, n) => new Date(d.getTime() - n * 86400000);
   const datetime = now.toISOString().replace('T', ' ').substring(0, 19);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  // Pre-calculate standard windows so Sarah never anchors to pre-loaded funnel dates.
+  // G12: all relative time terms resolve against these values, not pre-loaded funnel _period.
+  const timeWindows = [
+    'Pre-calculated time windows — use these for ALL relative queries (never use pre-loaded funnel dates as time defaults):',
+    `  last_30_days : ${fmt(subDays(now, 30))} to ${fmt(now)}`,
+    `  last_90_days : ${fmt(subDays(now, 90))} to ${fmt(now)}`,
+    `  last_8_weeks : ${fmt(subDays(now, 56))} to ${fmt(now)}`,
+    `  yesterday    : ${fmt(subDays(now, 1))}`,
+    `  last_week    : ${fmt(subDays(now, 7))} to ${fmt(now)}`,
+  ].join('\n');
 
   const dashboards = [];
   let mixpanelProjectId = null;
@@ -650,6 +667,7 @@ function buildDynamicHeader(workspace) {
   return [
     `Current datetime: ${datetime}`,
     `Timezone: ${timezone}`,
+    timeWindows,
     `Connected dashboards: ${availableDashboards}`,
     `IMPORTANT: The above "Connected dashboards" list is the ground truth for this session. Ignore any prior conversation history that contradicts it.`,
     mixpanelLinkLine,
@@ -837,11 +855,27 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
       const dictSection = buildDictSection(eventDictionary);
 
       // Intent Mapper — resolve PM business intents to actual event names in this project.
-      // Runs ONLY when 'intents' key is present in event_dictionary.
-      // Dictionary explicit mappings (dictSection) take priority; Intent Mapper fills gaps.
+      // Workspace intents (event_dictionary.intents) take priority.
+      // Falls back to config/intent_definitions.json defaults when none configured.
+      // Dictionary explicit mappings (dictSection) always override intent-resolved events.
       let resolvedIntentsStr = '';
-      const intentDefs = eventDictionary?.intents;
-      if (intentDefs && Object.keys(intentDefs).length > 0) {
+      const workspaceIntents = eventDictionary?.intents;
+
+      // Load default intents from file as fallback — fixes "active users" guessing wrong event
+      // (e.g. Sign Up Started instead of $session_start) when no workspace intents are set.
+      let effectiveIntentDefs = workspaceIntents;
+      if (!effectiveIntentDefs || Object.keys(effectiveIntentDefs).length === 0) {
+        try {
+          const intentDefPath = path.join(__dirname, '../config/intent_definitions.json');
+          const fileDef = JSON.parse(fs.readFileSync(intentDefPath, 'utf8'));
+          if (fileDef?.intents && Object.keys(fileDef.intents).length > 0) {
+            effectiveIntentDefs = fileDef.intents;
+            console.log('[IntentMapper] Using default intent_definitions.json (no workspace intents configured)');
+          }
+        } catch { /* file missing or invalid JSON — skip */ }
+      }
+
+      if (effectiveIntentDefs && Object.keys(effectiveIntentDefs).length > 0) {
         try {
           const eventNames = extractEventNames(events);
           const fromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -858,7 +892,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
             return Object.values(values).reduce((sum, v) => sum + (Number(v) || 0), 0);
           };
 
-          const resolved = await resolveAllIntents({ availableEvents: eventNames, intentDefs, queryUniqueCount });
+          const resolved = await resolveAllIntents({ availableEvents: eventNames, intentDefs: effectiveIntentDefs, queryUniqueCount });
           resolvedIntentsStr = formatResolvedIntents(resolved);
           console.log(`[IntentMapper] Resolved ${Object.keys(resolved).length} intent(s) for workspace ${workspace.workspace_id}`);
         } catch (err) {
@@ -892,7 +926,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         '4. AD-HOC FUNNELS: mixpanel_funnel accepts events=["Event A","Event B","Event C"] — no funnel_id needed. Use this for ANY conversion question, even if those events are not in a saved funnel.',
         '5. NEVER count users by summing daily segmentation values.',
         '6. Always state the source and period: "X unique users (funnel, last 30 days)" or "X unique users (funnel, <from> to <to>)".',
-        '7. CACHE METADATA: If a tool result contains _source="cache" and _age_hours, the live query failed and this is fallback data. You MUST: (a) downgrade confidence from Confirmed → Likely, (b) cite as "From Mixpanel (cache, X.Xh old):", (c) add to ❓ What I Don\'t Know: "Live Mixpanel data unavailable — using cache from X.X hours ago. Numbers may have shifted."',
+        '7. SOURCE METADATA: Every live tool result carries _source. Rules by value — _source="live": Confirmed is permitted; cite as "From Mixpanel (live):". _source="cache": live query failed, this is fallback data — you MUST (a) downgrade confidence Confirmed → Likely, (b) cite as "From Mixpanel (cache, X.Xh old):", (c) add to ❓ What I Don\'t Know: "Live Mixpanel unavailable — using cache from X.X hours ago. Numbers may have shifted." No _source or query unavailable: max Hypothesis.',
       ].filter(l => l !== null).join('\n');
     } catch (e) {
       console.log('[PrefetchError]', e.message);

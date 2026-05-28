@@ -1046,6 +1046,9 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   const maxIterations = 10;
 
   while (response.stop_reason === 'tool_use' && iterations < maxIterations) {
+    if (iterations > 0) {
+      console.log(`[ToolLoop] iteration=${iterations} stop_reason=${response.stop_reason} tools=${response.content.filter(b => b.type === 'tool_use').map(b => b.name).join(', ')}`);
+    }
     if (signal?.aborted) throw new Error('AbortError');
 
     iterations++;
@@ -1055,16 +1058,38 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
     let jiraAuthFailed = false;
 
+    // Per-tool timeout: prevents a hanging Mixpanel/Jira call from freezing the whole session.
+    // Without this, executeTool can hang indefinitely — the 90s timeout only covers Claude calls,
+    // not tool execution, so a slow Mixpanel response blocks Promise.all until the next Claude
+    // call eventually times out, leaving Sarah's last "Let me check..." text as the final response.
+    const TOOL_TIMEOUT_MS = 25_000; // 25s per tool call
+    async function executeToolWithTimeout(name, input) {
+      return Promise.race([
+        executeTool(name, input, workspace),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`TOOL_TIMEOUT: ${name} did not respond in ${TOOL_TIMEOUT_MS / 1000}s`)),
+            TOOL_TIMEOUT_MS
+          )
+        ),
+      ]);
+    }
+
     const toolResults = await Promise.all(
       toolUseBlocks.map(async (toolUse) => {
+        const t0 = Date.now();
         try {
-          const result = await executeTool(toolUse.name, toolUse.input, workspace);
+          const result = await executeToolWithTimeout(toolUse.name, toolUse.input);
+          console.log(`[ToolCall] ✅ ${toolUse.name} — ${Date.now() - t0}ms`);
           return {
             type: 'tool_result',
             tool_use_id: toolUse.id,
             content: JSON.stringify(result),
           };
         } catch (err) {
+          const isTimeout = err.message?.startsWith('TOOL_TIMEOUT');
+          console.error(`[ToolCall] ❌ ${toolUse.name} — ${Date.now() - t0}ms — ${err.message}`);
+
           // Detect Jira auth failures (expired/revoked token)
           const isJiraAuthErr = toolUse.name.startsWith('jira_') &&
             (err.response?.status === 401 || err.response?.status === 403 ||
@@ -1075,7 +1100,11 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
           return {
             type: 'tool_result',
             tool_use_id: toolUse.id,
-            content: JSON.stringify({ error: err.message }),
+            content: JSON.stringify({
+              error: isTimeout
+                ? `Tool timed out after ${TOOL_TIMEOUT_MS / 1000}s — Mixpanel/Jira may be slow. Try again.`
+                : err.message,
+            }),
             is_error: true,
           };
         }
@@ -1091,6 +1120,16 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
     messages.push({ role: 'user', content: toolResults });
     response = await createWithRetry({ ...requestOptions, messages });
+  }
+
+  // If loop exited because maxIterations was reached (not because Claude stopped calling tools),
+  // log it clearly and substitute a helpful message instead of Sarah's partial "Let me check..." text.
+  if (response.stop_reason === 'tool_use' && iterations >= maxIterations) {
+    console.warn(`[ToolLoop] maxIterations (${maxIterations}) reached — substituting graceful error`);
+    return {
+      response: 'I ran too many data queries without completing this analysis. This usually means the question is too broad or there\'s a data connectivity issue. Could you break it into a smaller question?',
+      conversationHistory: messages,
+    };
   }
 
   messages.push({ role: 'assistant', content: response.content });

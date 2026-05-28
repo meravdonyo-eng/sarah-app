@@ -375,6 +375,10 @@ export async function handleMessage({ message, say, client, context }) {
       err.stack?.split('\n').slice(0, 3).join(' | ')
     );
     if (err.error) console.error('[SarahError] API error body:', JSON.stringify(err.error).slice(0, 500));
+    // Extra context for 400 errors — most common cause is payload too large or malformed message
+    if (err.status === 400) {
+      console.error('[SarahError] 400 detail — likely causes: (1) message payload too large from accumulated tool results, (2) malformed tool_result block, (3) invalid content in conversation history. Check [ToolCall] lines above for context.');
+    }
     // Gap 2+4 — Error Shown: track every time Sarah fails to answer
     trackErrorShown(workspaceId, userId, {
       error_code:    err.status || err.code || null,

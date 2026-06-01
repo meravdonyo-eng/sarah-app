@@ -4,6 +4,7 @@ import {
   saveConversationHistory,
   clearConversationHistory,
   updateWorkspaceMixpanel,
+  updateWorkspaceAmplitude,
   updateWorkspaceJiraProject,
   checkAndMarkWelcome,
   getUserFlag,
@@ -41,12 +42,16 @@ import {
 } from './formatter.js';
 import { popReadMore, getReadMore } from './readMoreStore.js';
 import { executeMixpanelTool } from '../services/mixpanel.js';
+import { executeAmplitudeTool } from '../services/amplitude.js';
 
 const JIRA_AUTH_URL = (workspaceId, channelId = '') =>
   `${process.env.BACKEND_URL}/api/oauth/jira/start?workspace_id=${workspaceId}${channelId ? `&channel_id=${encodeURIComponent(channelId)}` : ''}`;
 
 // Tracks users currently going through Mixpanel setup flow
 const mixpanelSetupState = new Map(); // slackUserId -> { step, projectId, username }
+
+// Tracks users currently going through Amplitude setup flow
+const amplitudeSetupState = new Map(); // slackUserId -> { step, apiKey, workspaceId }
 
 // Tracks in-progress Claude requests so they can be cancelled
 const activeRequests = new Map(); // slackUserId -> { abortController, channelId, thinkingTs }
@@ -129,6 +134,12 @@ export async function handleMessage({ message, say, client, context }) {
     return;
   }
 
+  // --- Amplitude setup flow ---
+  if (amplitudeSetupState.has(userId)) {
+    await handleAmplitudeSetupStep({ userId, workspaceId, text, say });
+    return;
+  }
+
   // --- Commands ---
   const lower = text.toLowerCase();
 
@@ -160,6 +171,16 @@ export async function handleMessage({ message, say, client, context }) {
       return;
     }
     await sayJiraConnect(workspaceId, say, channelId);
+    return;
+  }
+
+  if (lower.includes('connect amplitude') || lower.includes('reconnect amplitude') ||
+      lower.includes('חבר amplitude') || lower.includes('חיבור amplitude')) {
+    if (workspace.amplitude_api_key && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
+      await say({ text: 'Amplitude is already connected ✅\nTo switch to a different project, type *reconnect amplitude*.' });
+      return;
+    }
+    await startAmplitudeStep1(userId, say, workspaceId);
     return;
   }
 
@@ -540,6 +561,108 @@ async function handleMixpanelSetupStep({ userId, workspaceId, text, say }) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Amplitude setup flow — 2 steps: API Key → Secret Key → verify → save
+// ---------------------------------------------------------------------------
+
+async function startAmplitudeStep1(userId, say, workspaceId) {
+  amplitudeSetupState.set(userId, { step: 'api_key', workspaceId });
+  await say({
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*Connect Amplitude — Step 1 of 2*\n\n' +
+                '*API Key:*\n' +
+                '1. Open Amplitude → Settings → Projects → [your project]\n' +
+                '2. Copy the *API Key* and send it here:',
+        },
+      },
+    ],
+    text: 'Connect Amplitude — Step 1 of 2',
+  });
+}
+
+async function handleAmplitudeSetupStep({ userId, workspaceId, text, say }) {
+  const state = amplitudeSetupState.get(userId);
+
+  if (state.step === 'api_key') {
+    const apiKey = stripLabel(text, 'api key', 'api_key', 'apikey');
+    amplitudeSetupState.set(userId, { ...state, step: 'secret_key', apiKey });
+    await say({
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: ':white_check_mark: Got it ✓  *Step 2 of 2*\n\n' +
+                  '*Secret Key:*\n' +
+                  'From the same project page — copy the *Secret Key* and send it here:',
+          },
+        },
+      ],
+      text: 'Step 2 of 2 — Secret Key',
+    });
+    return;
+  }
+
+  if (state.step === 'secret_key') {
+    const secretKey = stripLabel(text, 'secret key', 'secret_key', 'secretkey', 'secret');
+    const { apiKey } = state;
+
+    await say({ text: '_Verifying Amplitude connection..._' });
+
+    try {
+      await executeAmplitudeTool('amplitude_list_events', {}, { apiKey, secretKey });
+
+      // Success — save encrypted credentials
+      await updateWorkspaceAmplitude(workspaceId, {
+        apiKey:    encrypt(apiKey),
+        secretKey: encrypt(secretKey),
+      });
+      amplitudeSetupState.delete(userId);
+
+      await say({
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: ':white_check_mark: *Amplitude connected successfully!*\n\n' +
+                    'You can now ask questions like:\n' +
+                    '• "What is my 7-day retention?"\n' +
+                    '• "What\'s the conversion from Sign Up to Activation?"\n' +
+                    '• "Which events have the highest daily active users?"\n\n' +
+                    'What would you like to know?',
+            },
+          },
+        ],
+        text: 'Amplitude connected successfully!',
+      });
+    } catch (err) {
+      console.error('[AmplitudeSetup] Connection failed:', err.message);
+      amplitudeSetupState.set(userId, { step: 'api_key', workspaceId });
+      await say({
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: ':x: *Connection failed* — one of the credentials may be incorrect.\n' +
+                    'Let\'s start over — Step 1 of 2:\n\n' +
+                    '*API Key:*\n' +
+                    '1. Open Amplitude → Settings → Projects → [your project]\n' +
+                    '2. Copy the *API Key* and send it here:',
+            },
+          },
+        ],
+        text: 'Connection failed — please try again',
+      });
+    }
+  }
+}
+
 export async function handleAppHomeOpened({ event, client, context }) {
   const userId = event.user;
   const workspaceId = context.teamId;
@@ -815,6 +938,16 @@ export async function handleAction({ action, ack, say, body, context, client }) 
     await sayJiraConnect(workspaceId, say, channelIdForJira);
     return;
   }
+
+  if (action.action_id === 'welcome_connect_amplitude') {
+    const workspace = await getWorkspace(workspaceId);
+    if (workspace?.amplitude_api_key) {
+      await say({ text: 'Amplitude is already connected ✅' });
+      return;
+    }
+    await startAmplitudeStep1(userId, say, workspaceId);
+    return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -844,15 +977,19 @@ export async function handleSarahCommand({ command, ack, client, context }) {
     }
 
     // Build status lines
-    const hasMixpanel = !!(workspace.mixpanel_project_id && workspace.mixpanel_username);
-    const hasJira     = isJiraValid(workspace);
-    let mpProjectId   = null;
+    const hasMixpanel  = !!(workspace.mixpanel_project_id && workspace.mixpanel_username);
+    const hasAmplitude = !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
+    const hasJira      = isJiraValid(workspace);
+    let mpProjectId    = null;
     if (hasMixpanel) {
       try { mpProjectId = decrypt(workspace.mixpanel_project_id); } catch {}
     }
     const mixpanelLine = hasMixpanel
       ? `✅ Mixpanel${mpProjectId ? ` (project ${mpProjectId})` : ''}`
       : '❌ Mixpanel — not connected';
+    const amplitudeLine = hasAmplitude
+      ? '✅ Amplitude'
+      : '❌ Amplitude — not connected';
     const jiraLine = hasJira
       ? `✅ Jira${workspace.jira_cloud_id ? ` (${workspace.jira_cloud_id})` : ''}`
       : '❌ Jira — not connected';
@@ -875,11 +1012,11 @@ export async function handleSarahCommand({ command, ack, client, context }) {
         // ── Connected tools (read-only) ──────────────────────────────────
         {
           type: 'section',
-          text: { type: 'mrkdwn', text: `*Connected tools*\n${mixpanelLine}\n${jiraLine}` },
+          text: { type: 'mrkdwn', text: `*Connected tools*\n${mixpanelLine}\n${amplitudeLine}\n${jiraLine}` },
         },
         {
           type: 'context',
-          elements: [{ type: 'mrkdwn', text: 'Type `connect mixpanel` or `connect jira` in chat to connect or reconnect.' }],
+          elements: [{ type: 'mrkdwn', text: 'Type `connect mixpanel`, `connect amplitude`, or `connect jira` in chat to connect or reconnect.' }],
         },
         { type: 'divider' },
         // ── Default Jira project (editable) ─────────────────────────────

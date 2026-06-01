@@ -62,6 +62,8 @@ export async function initDb() {
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_default_project TEXT;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_cloud_url TEXT;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS event_dictionary JSONB;
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS amplitude_api_key TEXT;
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS amplitude_secret_key TEXT;
 
     CREATE TABLE IF NOT EXISTS api_usage (
       workspace_id  TEXT NOT NULL,
@@ -108,6 +110,28 @@ export async function updateWorkspaceMixpanel(workspaceId, { projectId, username
          updated_at          = NOW()
      WHERE workspace_id = $1`,
     [workspaceId, projectId, username, secret]
+  );
+}
+
+export async function updateWorkspaceAmplitude(workspaceId, { apiKey, secretKey }) {
+  await pool.query(
+    `UPDATE workspaces
+     SET amplitude_api_key    = $2,
+         amplitude_secret_key = $3,
+         updated_at           = NOW()
+     WHERE workspace_id = $1`,
+    [workspaceId, apiKey, secretKey]
+  );
+}
+
+export async function clearAmplitudeCredentials(workspaceId) {
+  await pool.query(
+    `UPDATE workspaces
+     SET amplitude_api_key    = NULL,
+         amplitude_secret_key = NULL,
+         updated_at           = NOW()
+     WHERE workspace_id = $1`,
+    [workspaceId]
   );
 }
 

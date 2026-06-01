@@ -324,10 +324,12 @@ export function formatWelcome(workspace, lang = 'en') {
   const dayName = days[now.getDay()];
   const dateStr = now.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 
-  const hasMixpanel = !!workspace.mixpanel_project_id;
+  const hasMixpanel  = !!workspace.mixpanel_project_id;
+  const hasAmplitude = !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
+  const hasAnalytics = hasMixpanel || hasAmplitude;
   const hasJira = !!workspace.jira_access_token &&
     (!workspace.jira_expires_at || Date.now() < parseInt(workspace.jira_expires_at));
-  const allConnected = hasMixpanel && hasJira;
+  const allConnected = hasAnalytics && hasJira;
 
   const blocks = [
     {
@@ -359,8 +361,15 @@ export function formatWelcome(workspace, lang = 'en') {
     buttons.push({
       type: 'button',
       text: { type: 'plain_text', text: 'Connect Mixpanel' },
-      style: 'primary',
+      style: hasAnalytics ? undefined : 'primary', // primary only when no analytics at all
       action_id: 'welcome_connect_mixpanel',
+    });
+  }
+  if (!hasAmplitude) {
+    buttons.push({
+      type: 'button',
+      text: { type: 'plain_text', text: 'Connect Amplitude' },
+      action_id: 'welcome_connect_amplitude',
     });
   }
   if (!hasJira) {

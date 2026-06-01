@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { MIXPANEL_TOOLS, executeMixpanelTool, getMixpanelProjectTimezone } from './mixpanel.js';
+import { AMPLITUDE_TOOLS, executeAmplitudeTool } from './amplitude.js';
 import { JIRA_TOOLS, executeJiraTool } from './jira.js';
 import { decrypt } from './encryption.js';
 import { resolveAllIntents, formatResolvedIntents, extractEventNames } from './intentMapper.js';
@@ -169,9 +170,11 @@ export function isJiraValid(workspace) {
 
 function buildTools(workspace) {
   const tools = [];
-  const hasMixpanel = workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret;
+  const hasMixpanel  = workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret;
+  const hasAmplitude = workspace.amplitude_api_key && workspace.amplitude_secret_key;
 
-  if (hasMixpanel) tools.push(...MIXPANEL_TOOLS);
+  if (hasMixpanel)  tools.push(...MIXPANEL_TOOLS);
+  if (hasAmplitude) tools.push(...AMPLITUDE_TOOLS);
   if (isJiraValid(workspace)) tools.push(...JIRA_TOOLS);
 
   return tools;
@@ -181,7 +184,7 @@ function buildTools(workspace) {
 const mixpanelDiscoveryCache = new Map(); // key: `${workspaceId}:${toolName}` → { result, storedAt, expiresAt }
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
 // Only zero-arg discovery calls are cached (list_event_properties takes an event arg, so excluded)
-const DISCOVERY_TOOLS = new Set(['mixpanel_list_events', 'mixpanel_list_funnels']);
+const DISCOVERY_TOOLS = new Set(['mixpanel_list_events', 'mixpanel_list_funnels', 'amplitude_list_events']);
 
 // Cache for ALL other Mixpanel query results — TTL 1 hour.
 // Primary purpose: fallback when a live Mixpanel call fails (rate-limit, network, outage).
@@ -304,6 +307,51 @@ async function executeTool(toolName, args, workspace) {
       throw liveErr; // No usable cache — propagate so the tool_result gets is_error: true
     }
   }
+  if (toolName.startsWith('amplitude_')) {
+    const creds = {
+      apiKey:    decrypt(workspace.amplitude_api_key),
+      secretKey: decrypt(workspace.amplitude_secret_key),
+    };
+
+    // Fast discovery cache (10-min TTL) for zero-arg discovery calls
+    if (DISCOVERY_TOOLS.has(toolName) && Object.keys(args).length === 0) {
+      const cacheKey = `${workspace.workspace_id}:${toolName}`;
+      const cached = mixpanelDiscoveryCache.get(cacheKey); // reuse same cache Map
+      if (cached && Date.now() < cached.expiresAt) {
+        console.log(`[Cache] HIT ${toolName}`);
+        return cached.result;
+      }
+      const result = await executeAmplitudeTool(toolName, args, creds);
+      mixpanelDiscoveryCache.set(cacheKey, { result, storedAt: Date.now(), expiresAt: Date.now() + DISCOVERY_TTL_MS });
+      console.log(`[Cache] SET ${toolName}`);
+      return result;
+    }
+
+    // All other Amplitude calls: try live → save on success (1h TTL) → fallback to cache on failure
+    const argsKey = JSON.stringify(args);
+    const resultCacheKey = `${workspace.workspace_id}:${toolName}:${argsKey}`;
+
+    try {
+      const rawResult = await executeAmplitudeTool(toolName, args, creds);
+      const result = Array.isArray(rawResult)
+        ? { data: rawResult, _source: 'live' }
+        : { ...rawResult, _source: 'live' };
+      mixpanelResultCache.set(resultCacheKey, { result, storedAt: Date.now(), expiresAt: Date.now() + RESULT_CACHE_TTL_MS });
+      return result;
+    } catch (liveErr) {
+      const cached = mixpanelResultCache.get(resultCacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        const ageHours = parseFloat(((Date.now() - cached.storedAt) / 3_600_000).toFixed(1));
+        console.warn(`[ResultCache] FALLBACK ${toolName} age=${ageHours}h — live failed: ${liveErr.message}`);
+        const annotated = Array.isArray(cached.result)
+          ? { data: cached.result, _source: 'cache', _age_hours: ageHours }
+          : { ...cached.result, _source: 'cache', _age_hours: ageHours };
+        return annotated;
+      }
+      throw liveErr; // No usable cache — propagate
+    }
+  }
+
   if (toolName.startsWith('jira_')) {
     const creds = {
       accessToken: decrypt(workspace.jira_access_token),
@@ -646,6 +694,10 @@ function buildDynamicHeader(workspace) {
     dashboards.push(`Mixpanel project ${mixpanelProjectId} (Funnel, Retention, Engagement, User Journey, Errors, Segments)`);
     console.log(`[Session] Mixpanel project: ${mixpanelProjectId} | workspace: ${workspace.workspace_id}`);
   }
+  if (workspace.amplitude_api_key && workspace.amplitude_secret_key) {
+    dashboards.push('Amplitude (Segmentation, Funnels, Retention, Events — ad-hoc funnels only, no saved funnels)');
+    console.log(`[Session] Amplitude connected | workspace: ${workspace.workspace_id}`);
+  }
   const jiraConnected = isJiraValid(workspace);
   if (jiraConnected) {
     // Use live health cache result if available; default to "available" (credentials exist)
@@ -769,9 +821,9 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   // for non-funnel queries (error counts) even though the prompt contains funnel keywords.
   if (!options.skipToolFilter && detectFunnelQuestion(userMessage)) {
     const before = tools.length;
-    tools = tools.filter(t => t.name !== 'mixpanel_segmentation');
+    tools = tools.filter(t => t.name !== 'mixpanel_segmentation' && t.name !== 'amplitude_segmentation');
     if (tools.length < before) {
-      console.log('[ToolFilter] Removed mixpanel_segmentation for funnel question — funnel tool only');
+      console.log('[ToolFilter] Removed segmentation tools for funnel question — funnel tool only');
     }
   }
 
@@ -797,13 +849,14 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   let hoistedFunnels = [];
   const prefetchFromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const prefetchToDate   = new Date().toISOString().split('T')[0];
-  const hasMixpanel = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
-  // Skip Mixpanel prefetch for pure Jira questions (ticket/bug lookups have no use for events/funnels).
+  const hasMixpanel  = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
+  const hasAmplitude = !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
+  // Skip analytics prefetch for pure Jira questions (ticket/bug lookups have no use for events/funnels).
   // Saves ~3,000 tokens × N tool-loop iterations for questions like "show open P1 tickets".
-  // Keep prefetch if question also has funnel/conversion keywords — those need Mixpanel data.
+  // Keep prefetch if question also has funnel/conversion keywords — those need analytics data.
   const skipMixpanelPrefetch = detectJiraMandate(userMessage) && !detectFunnelQuestion(userMessage);
   if (skipMixpanelPrefetch) {
-    console.log('[PrefetchSkip] Jira-only question — skipping Mixpanel discovery prefetch');
+    console.log('[PrefetchSkip] Jira-only question — skipping analytics discovery prefetch');
   }
   if (hasMixpanel && !skipMixpanelPrefetch) {
     try {
@@ -930,6 +983,68 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
       ].filter(l => l !== null).join('\n');
     } catch (e) {
       console.log('[PrefetchError]', e.message);
+    }
+  }
+
+  // Pre-fetch Amplitude discovery data (event types) when Amplitude is connected.
+  // Amplitude has no saved funnels — funnels are always ad-hoc (events array).
+  if (hasAmplitude && !skipMixpanelPrefetch) {
+    try {
+      const events = await executeTool('amplitude_list_events', {}, workspace);
+      const eventsStr = JSON.stringify(events).slice(0, 3000);
+
+      // Intent mapper for Amplitude — reuses the same scoring engine as Mixpanel
+      let resolvedAmplitudeIntentsStr = '';
+      const eventDictionary = workspace.event_dictionary
+        ? (typeof workspace.event_dictionary === 'string'
+            ? JSON.parse(workspace.event_dictionary)
+            : workspace.event_dictionary)
+        : null;
+      const workspaceIntents = eventDictionary?.intents;
+      let effectiveIntentDefs = workspaceIntents;
+      if (!effectiveIntentDefs || Object.keys(effectiveIntentDefs).length === 0) {
+        try {
+          const intentDefPath = path.join(__dirname, '../config/intent_definitions.json');
+          const fileDef = JSON.parse(fs.readFileSync(intentDefPath, 'utf8'));
+          if (fileDef?.intents && Object.keys(fileDef.intents).length > 0) {
+            effectiveIntentDefs = fileDef.intents;
+          }
+        } catch { /* file missing or invalid — skip */ }
+      }
+      if (effectiveIntentDefs && Object.keys(effectiveIntentDefs).length > 0) {
+        try {
+          const eventNames = extractEventNames(events);
+          const resolved = await resolveAllIntents({
+            availableEvents: eventNames,
+            intentDefs: effectiveIntentDefs,
+            // No tier-2 volume check for Amplitude (would need an extra API call per event)
+          });
+          resolvedAmplitudeIntentsStr = formatResolvedIntents(resolved);
+        } catch (err) {
+          console.warn('[AmplitudeIntentMapper] Failed:', err.message);
+        }
+      }
+
+      const amplitudeSection = [
+        '\n\n--- PRE-LOADED AMPLITUDE DATA ---',
+        resolvedAmplitudeIntentsStr || null,
+        '',
+        'Available events:',
+        eventsStr,
+        '',
+        '⚠️ AMPLITUDE MANDATE ACTIVE:',
+        'If Amplitude appears in "Connected dashboards" above → you HAVE live API access. MUST query before saying data is unavailable.',
+        '1. Do NOT call amplitude_list_events — event list is above.',
+        '2. Amplitude has NO saved funnels. For ANY conversion/funnel question, call amplitude_funnel(events=[...]) directly.',
+        '3. For segmentation/counts, call amplitude_segmentation.',
+        '4. SOURCE METADATA: Every live tool result carries _source. _source="live": cite as "From Amplitude (live):" — Confirmed permitted. _source="cache": cite as "From Amplitude (cache, X.Xh old):" — max Likely.',
+        'FORBIDDEN when Amplitude is connected: "I need access to analytics tools", "I need your product data", "I don\'t have access to data".',
+      ].filter(l => l !== null).join('\n');
+
+      discoveryContext += amplitudeSection;
+      console.log(`[AmplitudePrefetch] Loaded ${Array.isArray(events) ? events.length : '?'} events for workspace ${workspace.workspace_id}`);
+    } catch (e) {
+      console.log('[AmplitudePrefetchError]', e.message);
     }
   }
 
@@ -1139,14 +1254,14 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   const currentTurnMsgs = messages.slice(currentTurnStartIdx);
   const toolsUsed = currentTurnMsgs
     .flatMap(m => (Array.isArray(m.content) ? m.content : []))
-    .filter(b => b.type === 'tool_use' && b.name?.startsWith('mixpanel_'))
+    .filter(b => b.type === 'tool_use' && (b.name?.startsWith('mixpanel_') || b.name?.startsWith('amplitude_')))
     .map(b => {
       const type = b.input?.type ? `(type=${b.input.type})` : '';
       return `${b.name}${type}`;
     });
   const hasRawSegmentation = toolsUsed.some(t => t.includes('segmentation') && t.includes('type=general'));
   const hasFunnel = toolsUsed.some(t => t.includes('funnel') && !t.includes('list'));
-  console.log(`[MixpanelValidation] tools=${toolsUsed.join(', ') || '(none)'} | funnel=${hasFunnel} | rawEvents=${hasRawSegmentation}`);
+  console.log(`[AnalyticsValidation] tools=${toolsUsed.join(', ') || '(none)'} | funnel=${hasFunnel} | rawEvents=${hasRawSegmentation}`);
   if (hasRawSegmentation && !hasFunnel) {
     console.warn('[MixpanelValidation] WARNING: used raw event count without funnel — check type=general');
   }

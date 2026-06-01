@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { MIXPANEL_TOOLS, executeMixpanelTool, getMixpanelProjectTimezone } from './mixpanel.js';
 import { AMPLITUDE_TOOLS, executeAmplitudeTool } from './amplitude.js';
+import { CLICKUP_TOOLS, executeClickupTool } from './clickup.js';
 import { JIRA_TOOLS, executeJiraTool } from './jira.js';
 import { decrypt } from './encryption.js';
 import { resolveAllIntents, formatResolvedIntents, extractEventNames } from './intentMapper.js';
@@ -172,9 +173,11 @@ function buildTools(workspace) {
   const tools = [];
   const hasMixpanel  = workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret;
   const hasAmplitude = workspace.amplitude_api_key && workspace.amplitude_secret_key;
+  const hasClickUp   = workspace.clickup_api_token && workspace.clickup_team_id;
 
   if (hasMixpanel)  tools.push(...MIXPANEL_TOOLS);
   if (hasAmplitude) tools.push(...AMPLITUDE_TOOLS);
+  if (hasClickUp)   tools.push(...CLICKUP_TOOLS);
   if (isJiraValid(workspace)) tools.push(...JIRA_TOOLS);
 
   return tools;
@@ -352,6 +355,14 @@ async function executeTool(toolName, args, workspace) {
     }
   }
 
+  if (toolName.startsWith('clickup_')) {
+    const creds = {
+      token:  decrypt(workspace.clickup_api_token),
+      teamId: workspace.clickup_team_id,
+    };
+    return executeClickupTool(toolName, args, creds);
+  }
+
   if (toolName.startsWith('jira_')) {
     const creds = {
       accessToken: decrypt(workspace.jira_access_token),
@@ -414,31 +425,36 @@ function sanitizeHistory(history) {
  * Orphaned blocks are cleaned up by the subsequent sanitizeHistory() call.
  */
 function purgeStaleJiraResults(history) {
-  // Identify jira tool_use IDs from assistant messages
-  const jiraToolUseIds = new Set();
+  // Identify jira_ and clickup_ tool_use IDs from assistant messages.
+  // Both are project-management tools — their raw results contaminate analytics answers
+  // the same way Jira results do (e.g., ClickUp task data biasing funnel interpretation).
+  const pmToolUseIds = new Set();
   for (const msg of history) {
     if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
-      if (block.type === 'tool_use' && block.name?.startsWith('jira_')) {
-        jiraToolUseIds.add(block.id);
+      if (block.type === 'tool_use' &&
+          (block.name?.startsWith('jira_') || block.name?.startsWith('clickup_'))) {
+        pmToolUseIds.add(block.id);
       }
     }
   }
-  if (jiraToolUseIds.size === 0) return history; // nothing to purge
+  if (pmToolUseIds.size === 0) return history; // nothing to purge
 
   return history.filter(msg => {
-    // Remove assistant turn that ONLY contains jira tool_use (no text reply yet)
+    // Remove assistant turn that ONLY contains PM tool_use blocks (no text reply yet)
     if (msg.role === 'assistant' && Array.isArray(msg.content)) {
       const hasText = msg.content.some(c => c.type === 'text');
-      const hasNonJiraTool = msg.content.some(c => c.type === 'tool_use' && !c.name?.startsWith('jira_'));
-      if (!hasText && !hasNonJiraTool) return false; // pure jira tool_use turn → drop
+      const hasNonPmTool = msg.content.some(
+        c => c.type === 'tool_use' && !c.name?.startsWith('jira_') && !c.name?.startsWith('clickup_')
+      );
+      if (!hasText && !hasNonPmTool) return false; // pure PM tool_use turn → drop
     }
-    // Remove user turn that ONLY contains jira tool_result blocks
+    // Remove user turn that ONLY contains PM tool_result blocks
     if (msg.role === 'user' && Array.isArray(msg.content)) {
       const usefulBlocks = msg.content.filter(
-        c => c.type !== 'tool_result' || !jiraToolUseIds.has(c.tool_use_id)
+        c => c.type !== 'tool_result' || !pmToolUseIds.has(c.tool_use_id)
       );
-      if (usefulBlocks.length === 0) return false; // all blocks are stale jira results → drop
+      if (usefulBlocks.length === 0) return false; // all blocks are stale PM results → drop
     }
     return true;
   });
@@ -632,6 +648,23 @@ export function detectJiraMandate(question) {
   return false;
 }
 
+// --- ClickUp Mandate ---
+// Triggers when user explicitly references ClickUp or a ClickUp task.
+const CLICKUP_KEYWORDS = ['clickup', 'click up', 'cu task', 'cu-', 'cu ticket'];
+// ClickUp task IDs appear in URLs like clickup.com/t/86a8k...
+const CLICKUP_TASK_URL_REGEX = /clickup\.com\/t\//i;
+// ClickUp task IDs are short alphanumeric strings, often 8-12 chars
+// Only match when prefixed with # (ClickUp in-app format) to avoid false positives
+const CLICKUP_TASK_ID_REGEX = /#[a-z0-9]{6,}/i;
+
+export function detectClickUpMandate(question) {
+  const lower = question.toLowerCase();
+  if (CLICKUP_TASK_URL_REGEX.test(question)) return true;
+  if (CLICKUP_TASK_ID_REGEX.test(question)) return true;
+  if (CLICKUP_KEYWORDS.some(kw => lower.includes(kw))) return true;
+  return false;
+}
+
 
 // --- Baseline Query (extended date range) ---
 const BASELINE_KEYWORDS = ['after fix', 'after the fix', 'after fixing', 'before and after', 'did it improve', 'did it help', 'impact of', 'effect of', 'since the fix', 'since we fixed', 'since deploying', 'post fix', 'post-fix', 'post deploy', 'after deploy', 'decrease in errors', 'increase in completion'];
@@ -655,6 +688,10 @@ function buildMessageAddons(userMessage) {
 
   if (detectJiraMandate(userMessage)) {
     addons.push('JIRA MANDATE ACTIVE: This question contains bug/error/support keywords. Pull Jira FIRST before any Mixpanel analysis. Jira = primary source. Mixpanel = validation only.');
+  }
+
+  if (detectClickUpMandate(userMessage)) {
+    addons.push('CLICKUP MANDATE ACTIVE: This question references ClickUp tasks. Pull ClickUp FIRST. Use clickup_search_tasks or clickup_get_task. ClickUp = primary source. Analytics = validation only.');
   }
 
   if (detectBaselineQuery(userMessage)) {
@@ -697,6 +734,10 @@ function buildDynamicHeader(workspace) {
   if (workspace.amplitude_api_key && workspace.amplitude_secret_key) {
     dashboards.push('Amplitude (Segmentation, Funnels, Retention, Events — ad-hoc funnels only, no saved funnels)');
     console.log(`[Session] Amplitude connected | workspace: ${workspace.workspace_id}`);
+  }
+  if (workspace.clickup_api_token && workspace.clickup_team_id) {
+    dashboards.push(`ClickUp team ${workspace.clickup_team_id} (Tasks, Spaces, Search)`);
+    console.log(`[Session] ClickUp team: ${workspace.clickup_team_id} | workspace: ${workspace.workspace_id}`);
   }
   const jiraConnected = isJiraValid(workspace);
   if (jiraConnected) {
@@ -851,12 +892,13 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   const prefetchToDate   = new Date().toISOString().split('T')[0];
   const hasMixpanel  = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
   const hasAmplitude = !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
-  // Skip analytics prefetch for pure Jira questions (ticket/bug lookups have no use for events/funnels).
-  // Saves ~3,000 tokens × N tool-loop iterations for questions like "show open P1 tickets".
+  // Skip analytics prefetch for pure project-management questions (Jira/ClickUp ticket lookups
+  // have no use for events/funnels). Saves ~3,000 tokens per question like "show open P1 tasks".
   // Keep prefetch if question also has funnel/conversion keywords — those need analytics data.
-  const skipMixpanelPrefetch = detectJiraMandate(userMessage) && !detectFunnelQuestion(userMessage);
+  const skipMixpanelPrefetch = (detectJiraMandate(userMessage) || detectClickUpMandate(userMessage))
+    && !detectFunnelQuestion(userMessage);
   if (skipMixpanelPrefetch) {
-    console.log('[PrefetchSkip] Jira-only question — skipping analytics discovery prefetch');
+    console.log('[PrefetchSkip] PM-tool-only question — skipping analytics discovery prefetch');
   }
   if (hasMixpanel && !skipMixpanelPrefetch) {
     try {
@@ -1102,14 +1144,14 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   // Strip stale Jira tool results when the current question is funnel/behavioral.
   // Prevents session contamination: Jira ticket data from a previous turn biasing
   // funnel answers ("why did users drop") with irrelevant ticket numbers.
-  if (!detectJiraMandate(userMessage)) {
+  if (!detectJiraMandate(userMessage) && !detectClickUpMandate(userMessage)) {
     const before = sanitizedHistory.length;
     sanitizedHistory = purgeStaleJiraResults(sanitizedHistory);
     // Re-sanitize to clean up any orphaned blocks left after the purge
     sanitizedHistory = sanitizeHistory(sanitizedHistory);
     const removed = before - sanitizedHistory.length;
     if (removed > 0) {
-      console.log(`[HistoryPurge] Stripped ${removed} stale Jira history entries for non-Jira question`);
+      console.log(`[HistoryPurge] Stripped ${removed} stale PM-tool history entries for analytics question`);
     }
   }
   // Track where current-turn messages start (after history + current user msg)

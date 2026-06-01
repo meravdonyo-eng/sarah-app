@@ -326,10 +326,11 @@ export function formatWelcome(workspace, lang = 'en') {
 
   const hasMixpanel  = !!workspace.mixpanel_project_id;
   const hasAmplitude = !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
+  const hasClickUp   = !!(workspace.clickup_api_token && workspace.clickup_team_id);
   const hasAnalytics = hasMixpanel || hasAmplitude;
   const hasJira = !!workspace.jira_access_token &&
     (!workspace.jira_expires_at || Date.now() < parseInt(workspace.jira_expires_at));
-  const allConnected = hasAnalytics && hasJira;
+  const allConnected = hasAnalytics && (hasJira || hasClickUp);
 
   const blocks = [
     {
@@ -370,6 +371,13 @@ export function formatWelcome(workspace, lang = 'en') {
       type: 'button',
       text: { type: 'plain_text', text: 'Connect Amplitude' },
       action_id: 'welcome_connect_amplitude',
+    });
+  }
+  if (!hasClickUp) {
+    buttons.push({
+      type: 'button',
+      text: { type: 'plain_text', text: 'Connect ClickUp' },
+      action_id: 'welcome_connect_clickup',
     });
   }
   if (!hasJira) {

@@ -5,6 +5,7 @@ import {
   clearConversationHistory,
   updateWorkspaceMixpanel,
   updateWorkspaceAmplitude,
+  updateWorkspaceClickup,
   updateWorkspaceJiraProject,
   checkAndMarkWelcome,
   getUserFlag,
@@ -29,7 +30,7 @@ import {
 import { getCachedSnapshot, setCachedSnapshot } from '../services/snapshotCache.js';
 import { generateSnapshot } from '../services/snapshot.js';
 import { encrypt } from '../services/encryption.js';
-import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectBaselineQuery, detectFunnelQuestion } from '../services/claude.js';
+import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectClickUpMandate, detectBaselineQuery, detectFunnelQuestion } from '../services/claude.js';
 import {
   formatResponse,
   formatResponseSmart,
@@ -43,6 +44,7 @@ import {
 import { popReadMore, getReadMore } from './readMoreStore.js';
 import { executeMixpanelTool } from '../services/mixpanel.js';
 import { executeAmplitudeTool } from '../services/amplitude.js';
+import { getClickUpTeams } from '../services/clickup.js';
 
 const JIRA_AUTH_URL = (workspaceId, channelId = '') =>
   `${process.env.BACKEND_URL}/api/oauth/jira/start?workspace_id=${workspaceId}${channelId ? `&channel_id=${encodeURIComponent(channelId)}` : ''}`;
@@ -52,6 +54,9 @@ const mixpanelSetupState = new Map(); // slackUserId -> { step, projectId, usern
 
 // Tracks users currently going through Amplitude setup flow
 const amplitudeSetupState = new Map(); // slackUserId -> { step, apiKey, workspaceId }
+
+// Tracks users currently going through ClickUp setup flow
+const clickupSetupState = new Map(); // slackUserId -> { step, token, teams, workspaceId }
 
 // Tracks in-progress Claude requests so they can be cancelled
 const activeRequests = new Map(); // slackUserId -> { abortController, channelId, thinkingTs }
@@ -140,6 +145,12 @@ export async function handleMessage({ message, say, client, context }) {
     return;
   }
 
+  // --- ClickUp setup flow ---
+  if (clickupSetupState.has(userId)) {
+    await handleClickUpSetupStep({ userId, workspaceId, text, say });
+    return;
+  }
+
   // --- Commands ---
   const lower = text.toLowerCase();
 
@@ -181,6 +192,17 @@ export async function handleMessage({ message, say, client, context }) {
       return;
     }
     await startAmplitudeStep1(userId, say, workspaceId);
+    return;
+  }
+
+  if (lower.includes('connect clickup') || lower.includes('reconnect clickup') ||
+      lower.includes('connect click up') || lower.includes('reconnect click up') ||
+      lower.includes('חבר clickup') || lower.includes('חיבור clickup')) {
+    if (workspace.clickup_api_token && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
+      await say({ text: 'ClickUp is already connected ✅\nTo switch workspace, type *reconnect clickup*.' });
+      return;
+    }
+    await startClickUpStep1(userId, say, workspaceId);
     return;
   }
 
@@ -663,6 +685,145 @@ async function handleAmplitudeSetupStep({ userId, workspaceId, text, say }) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ClickUp setup flow — 2 steps: API Token → auto-detect team → save
+// If the token has access to multiple workspaces, ask the user to choose.
+// ---------------------------------------------------------------------------
+
+async function startClickUpStep1(userId, say, workspaceId) {
+  clickupSetupState.set(userId, { step: 'token', workspaceId });
+  await say({
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*Connect ClickUp — Step 1 of 2*\n\n' +
+                '*Personal API Token:*\n' +
+                '1. Open ClickUp → Settings (bottom-left avatar) → Apps\n' +
+                '2. Under *API Token*, click *Generate*\n' +
+                '3. Copy the token (starts with `pk_`) and send it here:\n\n' +
+                '_Sarah will automatically detect your ClickUp workspace._',
+        },
+      },
+    ],
+    text: 'Connect ClickUp — Step 1 of 2',
+  });
+}
+
+async function handleClickUpSetupStep({ userId, workspaceId, text, say }) {
+  const state = clickupSetupState.get(userId);
+
+  if (state.step === 'token') {
+    const token = stripLabel(text, 'token', 'api token', 'personal api token');
+
+    await say({ text: '_Verifying ClickUp token..._' });
+
+    try {
+      const teams = await getClickUpTeams(token);
+      if (teams.length === 0) {
+        throw new Error('No workspaces found for this token');
+      }
+
+      if (teams.length === 1) {
+        // Only one workspace — auto-select and save immediately
+        const team = teams[0];
+        await updateWorkspaceClickup(workspaceId, {
+          apiToken: encrypt(token),
+          teamId:   team.id,
+        });
+        clickupSetupState.delete(userId);
+        await say({
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `:white_check_mark: *ClickUp connected!*\n\nWorkspace: *${team.name}*\n\n` +
+                      'You can now ask Sarah things like:\n' +
+                      '• "Show me all high-priority open tasks"\n' +
+                      '• "What tasks are due this week?"\n' +
+                      '• "Find tasks related to onboarding"\n\n' +
+                      'What would you like to know?',
+              },
+            },
+          ],
+          text: 'ClickUp connected!',
+        });
+      } else {
+        // Multiple workspaces — ask user to choose
+        const teamList = teams.map((t, i) => `*${i + 1}.* ${t.name} (${t.members_count} members)`).join('\n');
+        clickupSetupState.set(userId, { step: 'choose_team', token, teams, workspaceId });
+        await say({
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: ':white_check_mark: Token valid — *Step 2 of 2*\n\n' +
+                      'Found multiple ClickUp workspaces. Which one should Sarah connect to?\n\n' +
+                      `${teamList}\n\n` +
+                      'Reply with the number (e.g. *1*) or the workspace name:',
+              },
+            },
+          ],
+          text: 'Which ClickUp workspace?',
+        });
+      }
+    } catch (err) {
+      console.error('[ClickUpSetup] Token validation failed:', err.message);
+      clickupSetupState.delete(userId);
+      await say({
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: ':x: *Connection failed* — the token may be invalid or expired.\n' +
+                    'Please try again with `connect clickup`.\n\n' +
+                    '_Tip: Make sure you copy the full token starting with `pk_`._',
+            },
+          },
+        ],
+        text: 'ClickUp connection failed',
+      });
+    }
+    return;
+  }
+
+  if (state.step === 'choose_team') {
+    const { token, teams } = state;
+    const input = text.trim();
+    let selectedTeam = null;
+
+    // Try numeric selection first
+    const num = parseInt(input, 10);
+    if (!isNaN(num) && num >= 1 && num <= teams.length) {
+      selectedTeam = teams[num - 1];
+    } else {
+      // Try name match (case-insensitive)
+      selectedTeam = teams.find(t => t.name.toLowerCase().includes(input.toLowerCase()));
+    }
+
+    if (!selectedTeam) {
+      const teamList = teams.map((t, i) => `*${i + 1}.* ${t.name}`).join('\n');
+      await say({
+        text: `Couldn't find that workspace. Please reply with a number:\n\n${teamList}`,
+      });
+      return;
+    }
+
+    await updateWorkspaceClickup(workspaceId, {
+      apiToken: encrypt(token),
+      teamId:   selectedTeam.id,
+    });
+    clickupSetupState.delete(userId);
+    await say({
+      text: `:white_check_mark: *ClickUp connected!*\n\nWorkspace: *${selectedTeam.name}*\n\nAsk Sarah about tasks, priorities, or due dates anytime.`,
+    });
+  }
+}
+
 export async function handleAppHomeOpened({ event, client, context }) {
   const userId = event.user;
   const workspaceId = context.teamId;
@@ -948,6 +1109,16 @@ export async function handleAction({ action, ack, say, body, context, client }) 
     await startAmplitudeStep1(userId, say, workspaceId);
     return;
   }
+
+  if (action.action_id === 'welcome_connect_clickup') {
+    const workspace = await getWorkspace(workspaceId);
+    if (workspace?.clickup_api_token) {
+      await say({ text: 'ClickUp is already connected ✅' });
+      return;
+    }
+    await startClickUpStep1(userId, say, workspaceId);
+    return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -979,6 +1150,7 @@ export async function handleSarahCommand({ command, ack, client, context }) {
     // Build status lines
     const hasMixpanel  = !!(workspace.mixpanel_project_id && workspace.mixpanel_username);
     const hasAmplitude = !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
+    const hasClickUp   = !!(workspace.clickup_api_token && workspace.clickup_team_id);
     const hasJira      = isJiraValid(workspace);
     let mpProjectId    = null;
     if (hasMixpanel) {
@@ -990,6 +1162,9 @@ export async function handleSarahCommand({ command, ack, client, context }) {
     const amplitudeLine = hasAmplitude
       ? '✅ Amplitude'
       : '❌ Amplitude — not connected';
+    const clickupLine = hasClickUp
+      ? `✅ ClickUp`
+      : '❌ ClickUp — not connected';
     const jiraLine = hasJira
       ? `✅ Jira${workspace.jira_cloud_id ? ` (${workspace.jira_cloud_id})` : ''}`
       : '❌ Jira — not connected';
@@ -1012,11 +1187,11 @@ export async function handleSarahCommand({ command, ack, client, context }) {
         // ── Connected tools (read-only) ──────────────────────────────────
         {
           type: 'section',
-          text: { type: 'mrkdwn', text: `*Connected tools*\n${mixpanelLine}\n${amplitudeLine}\n${jiraLine}` },
+          text: { type: 'mrkdwn', text: `*Connected tools*\n${mixpanelLine}\n${amplitudeLine}\n${clickupLine}\n${jiraLine}` },
         },
         {
           type: 'context',
-          elements: [{ type: 'mrkdwn', text: 'Type `connect mixpanel`, `connect amplitude`, or `connect jira` in chat to connect or reconnect.' }],
+          elements: [{ type: 'mrkdwn', text: 'Type `connect mixpanel`, `connect amplitude`, `connect clickup`, or `connect jira` in chat to connect or reconnect.' }],
         },
         { type: 'divider' },
         // ── Default Jira project (editable) ─────────────────────────────

@@ -64,6 +64,8 @@ export async function initDb() {
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS event_dictionary JSONB;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS amplitude_api_key TEXT;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS amplitude_secret_key TEXT;
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS clickup_api_token TEXT;
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS clickup_team_id TEXT;
 
     CREATE TABLE IF NOT EXISTS api_usage (
       workspace_id  TEXT NOT NULL,
@@ -121,6 +123,28 @@ export async function updateWorkspaceAmplitude(workspaceId, { apiKey, secretKey 
          updated_at           = NOW()
      WHERE workspace_id = $1`,
     [workspaceId, apiKey, secretKey]
+  );
+}
+
+export async function updateWorkspaceClickup(workspaceId, { apiToken, teamId }) {
+  await pool.query(
+    `UPDATE workspaces
+     SET clickup_api_token = $2,
+         clickup_team_id   = $3,
+         updated_at        = NOW()
+     WHERE workspace_id = $1`,
+    [workspaceId, apiToken, teamId]
+  );
+}
+
+export async function clearClickupCredentials(workspaceId) {
+  await pool.query(
+    `UPDATE workspaces
+     SET clickup_api_token = NULL,
+         clickup_team_id   = NULL,
+         updated_at        = NOW()
+     WHERE workspace_id = $1`,
+    [workspaceId]
   );
 }
 

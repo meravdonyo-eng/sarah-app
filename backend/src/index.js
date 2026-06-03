@@ -1,11 +1,13 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import pkg from '@slack/bolt';
 const { App, ExpressReceiver } = pkg;
-import { initDb, getWorkspace } from './services/db.js';
+import { initDb, getWorkspace, deleteOldConversations } from './services/db.js';
 import { decrypt } from './services/encryption.js';
 import { handleMessage, handleAppMention, handleAction, handleAppHomeOpened, handleSarahCommand, handleSarahSettingsSubmission } from './slack/handlers.js';
 import { startTokenRefreshDaemon } from './services/ownerAlerts.js';
@@ -77,15 +79,45 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(helmet());
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(express.json());
 
+// --- Rate limiting ---
+// Admin panel: very strict — protects against brute-force on ADMIN_TOKEN
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// OAuth install/callback: rare action, limit to prevent abuse
+const oauthLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 30,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// General API: generous limit for normal use
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // Routes
-app.use('/api/oauth', oauthRouter);
-app.use('/api/agent', agentRouter);
-app.use('/api/slack', slackRouter);
-app.use('/api/admin', adminRouter);
-app.use('/admin', adminUiRouter);
+app.use('/api/oauth', oauthLimiter, oauthRouter);
+app.use('/api/agent', adminLimiter, agentRouter);
+app.use('/api/slack', oauthLimiter, slackRouter);
+app.use('/api/admin', adminLimiter, adminRouter);
+app.use('/admin', adminLimiter, adminUiRouter);
+app.use('/health', generalLimiter);
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
@@ -111,6 +143,19 @@ async function start() {
 
   // Alert C — OAuth token refresh daemon (runs every 4h)
   startTokenRefreshDaemon();
+
+  // GDPR — Retention cleanup: delete conversation history older than 90 days
+  // Runs once at startup then every 24 hours
+  async function runRetentionCleanup() {
+    try {
+      const deleted = await deleteOldConversations(90);
+      if (deleted > 0) console.log(`[GDPR Retention] Deleted ${deleted} conversations older than 90 days`);
+    } catch (err) {
+      console.error('[GDPR Retention] Cleanup failed:', err.message);
+    }
+  }
+  runRetentionCleanup();
+  setInterval(runRetentionCleanup, 24 * 60 * 60 * 1000);
 }
 
 start().catch((err) => {

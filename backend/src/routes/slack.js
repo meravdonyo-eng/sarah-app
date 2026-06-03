@@ -99,9 +99,10 @@ router.get('/callback', async (req, res) => {
     trackSignUpCompleted(workspaceId, teamName, utmProps).catch(() => {});
     setWorkspaceRevenue(workspaceId, 'free').catch(() => {});
 
+    const safeTeamName = teamName.replace(/[<>&"']/g, c => `&#${c.charCodeAt(0)};`);
     res.send(html(
       'Sarah installed!',
-      `<p>✅ Sarah was successfully added to workspace <strong>${teamName}</strong></p>
+      `<p>✅ Sarah was successfully added to workspace <strong>${safeTeamName}</strong></p>
        <p>Open Slack and send Sarah a message to get started.</p>`
     ));
   } catch (err) {

@@ -17,6 +17,7 @@ import {
   addEventToDictionary,
   updateWorkspaceEventDictionary,
   updateWorkspaceSystemPrompt,
+  deleteUserAllData,
 } from '../services/db.js';
 import { sendOwnerAlert, checkApibudget } from '../services/ownerAlerts.js';
 import {
@@ -127,6 +128,15 @@ export async function handleMessage({ message, say, client, context }) {
     return;
   }
 
+  // GDPR — show privacy notice once per user on first interaction
+  const hasSeenPrivacyNotice = await getUserFlag(workspaceId, userId, 'gdpr_notice_shown');
+  if (!hasSeenPrivacyNotice) {
+    await setUserFlag(workspaceId, userId, 'gdpr_notice_shown');
+    await say({
+      text: '🔒 *Privacy notice:* Sarah uses Claude AI (Anthropic) to process your questions. Your messages are stored for conversation context and automatically deleted after 90 days. Type *delete my data* at any time to remove all your data immediately.',
+    });
+  }
+
   // --- Greeting detection: respond briefly, don't send to Claude ---
   if (GREETING_PATTERN.test(text)) {
     await say({ text: 'Hey! 👋 I\'m here and ready to help. What would you like to know about your data?' });
@@ -157,6 +167,12 @@ export async function handleMessage({ message, say, client, context }) {
   if (lower === '/reset' || lower === 'reset' || lower === 'התחל מחדש') {
     await clearConversationHistory(workspaceId, userId, channelId);
     await say('Conversation reset. Feel free to start fresh!');
+    return;
+  }
+
+  if (lower === 'delete my data' || lower === 'מחק את הנתונים שלי' || lower === 'delete data') {
+    await deleteUserAllData(workspaceId, userId);
+    await say('✅ Done — all your data has been permanently deleted from Sarah (conversation history, preferences, and activity records).');
     return;
   }
 

@@ -361,4 +361,30 @@ export async function getTotalMonthlyUsage() {
   return parseFloat(rows[0]?.total || '0');
 }
 
+// GDPR — Right to Erasure: delete all personal data for a specific user
+export async function deleteUserAllData(workspaceId, slackUserId) {
+  await pool.query(
+    'DELETE FROM conversations WHERE workspace_id = $1 AND slack_user_id = $2',
+    [workspaceId, slackUserId]
+  );
+  await pool.query(
+    'DELETE FROM user_welcome_dates WHERE workspace_id = $1 AND slack_user_id = $2',
+    [workspaceId, slackUserId]
+  );
+  await pool.query(
+    'DELETE FROM user_flags WHERE workspace_id = $1 AND slack_user_id = $2',
+    [workspaceId, slackUserId]
+  );
+}
+
+// GDPR — Retention policy: delete conversations older than N days
+export async function deleteOldConversations(daysOld = 90) {
+  const cutoff = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
+  const { rowCount } = await pool.query(
+    'DELETE FROM conversations WHERE updated_at < $1',
+    [cutoff]
+  );
+  return rowCount;
+}
+
 export default pool;

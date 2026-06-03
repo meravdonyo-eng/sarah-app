@@ -64,7 +64,7 @@ function readGlobalPrompt() {
   }
 }
 
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 let client = null;
 function getClient() {
@@ -1164,9 +1164,10 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
   const requestOptions = {
     model: DEFAULT_MODEL,
-    max_tokens: 4096,
+    max_tokens: 16000,
     system: systemBlocks,
     messages,
+    output_config: { effort: 'high' },
   };
 
   if (tools.length > 0) {

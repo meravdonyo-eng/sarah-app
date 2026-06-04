@@ -50,6 +50,8 @@ Always state source: "From ClickUp: N tasks found"`,
         priority:      { type: 'string',  enum: ['urgent', 'high', 'normal', 'low'], description: 'Filter by priority' },
         due_date_from: { type: 'string',  description: 'Tasks due on or after this date YYYY-MM-DD' },
         due_date_to:   { type: 'string',  description: 'Tasks due on or before this date YYYY-MM-DD' },
+        updated_since: { type: 'string',  description: 'Tasks updated on or after this date YYYY-MM-DD (use for "what changed today/this week")' },
+        created_since: { type: 'string',  description: 'Tasks created on or after this date YYYY-MM-DD' },
         include_closed:{ type: 'boolean', description: 'Include closed/completed tasks (default: false)' },
         max_results:   { type: 'number',  description: 'Max number of results (default: 20, max: 100)' },
       },
@@ -107,6 +109,8 @@ export async function executeClickupTool(toolName, args, creds) {
       if (args.priority)      params['priorities[]']   = PRIORITY_IDS[args.priority] ?? args.priority;
       if (args.due_date_from) params.due_date_gt       = new Date(args.due_date_from).getTime();
       if (args.due_date_to)   params.due_date_lt       = new Date(args.due_date_to).getTime();
+      if (args.updated_since) params.date_updated_gt   = new Date(args.updated_since).getTime();
+      if (args.created_since) params.date_created_gt   = new Date(args.created_since).getTime();
 
       const data = await request(`team/${teamId}/task`, params, token);
       const tasks = (data?.tasks ?? []).map(formatTask);

@@ -30,7 +30,7 @@ import {
 } from '../services/sarahAnalytics.js';
 import { getCachedSnapshot, setCachedSnapshot } from '../services/snapshotCache.js';
 import { generateSnapshot } from '../services/snapshot.js';
-import { encrypt } from '../services/encryption.js';
+import { encrypt, decrypt } from '../services/encryption.js';
 import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectClickUpMandate, detectBaselineQuery, detectFunnelQuestion } from '../services/claude.js';
 import {
   formatResponse,
@@ -525,6 +525,76 @@ async function sayJiraConnect(workspaceId, say, channelId = '') {
       },
     ],
     text: 'Connect Jira',
+  });
+}
+
+// ---- Key Events Onboarding ----
+// Called fire-and-forget after Mixpanel connects.
+// Scores event list for likely conversion + error candidates,
+// presents max 3 options as buttons, saves choice to event_dictionary.
+
+function scoreEvent(name, keywords) {
+  const lower = name.toLowerCase().replace(/[_\s-]/g, ' ');
+  return keywords.reduce((s, kw) => (lower.includes(kw) ? s + 1 : s), 0);
+}
+
+function topCandidates(eventNames, keywords, limit = 3) {
+  return eventNames
+    .map(name => ({ name, score: scoreEvent(name, keywords) }))
+    .filter(e => e.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(e => e.name);
+}
+
+function makeEventButtons(candidates, actionId) {
+  const btns = candidates.map(name => ({
+    type: 'button',
+    text: { type: 'plain_text', text: name.length > 24 ? name.slice(0, 22) + '…' : name },
+    action_id: actionId,
+    value: name,
+  }));
+  btns.push({
+    type: 'button',
+    text: { type: 'plain_text', text: 'Skip →' },
+    action_id: actionId,
+    value: '__skip__',
+  });
+  return btns;
+}
+
+async function startKeyEventsOnboarding(workspaceId, say, creds) {
+  // Brief pause so "Mixpanel connected" message appears first
+  await new Promise(r => setTimeout(r, 1500));
+
+  let eventNames = [];
+  try {
+    const events = await executeMixpanelTool('mixpanel_list_events', {}, creds);
+    eventNames = (Array.isArray(events) ? events : [])
+      .map(e => (typeof e === 'string' ? e : (e?.name ?? null)))
+      .filter(Boolean);
+  } catch {
+    return; // Can't fetch events — skip silently
+  }
+
+  if (eventNames.length === 0) return;
+
+  const conversionKeywords = ['complet', 'sign', 'activat', 'purchas', 'paid', 'subscrib', 'convert', 'onboard', 'success', 'register'];
+  const candidates = topCandidates(eventNames, conversionKeywords);
+  if (candidates.length === 0) return;
+
+  await say({
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '🎯 *Quick setup — one question*\n\nI found events that look like your main conversion milestone.\nWhich one represents *success* in your product?',
+        },
+      },
+      { type: 'actions', elements: makeEventButtons(candidates, 'key_event_conversion_select') },
+    ],
+    text: 'Key events setup — which is your main conversion event?',
   });
 }
 
@@ -1024,6 +1094,107 @@ export async function handleAction({ action, ack, say, body, context, client }) 
     return;
   }
 
+  // --- Key Events: conversion event selected ---
+  if (action.action_id === 'key_event_conversion_select') {
+    const selected = action.value;
+    const channelId = body.channel?.id || body.container?.channel_id;
+    const messageTs = body.message?.ts;
+
+    if (selected !== '__skip__') {
+      await addEventToDictionary(workspaceId, 'main conversion event', selected);
+    }
+
+    const confirmText = selected === '__skip__'
+      ? '⏩ Skipped — you can set this later with `set event main conversion event = EventName`'
+      : `✅ Saved *${selected}* as your main conversion event.`;
+
+    if (messageTs && channelId) {
+      await client.chat.update({
+        channel: channelId, ts: messageTs,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: confirmText } }],
+        text: confirmText,
+      });
+    }
+
+    // Now ask about error event
+    const ws = await getWorkspace(workspaceId);
+    if (!ws?.mixpanel_project_id) return;
+
+    let eventNames = [];
+    try {
+      const creds = {
+        projectId: decrypt(ws.mixpanel_project_id),
+        username:  decrypt(ws.mixpanel_username),
+        secret:    decrypt(ws.mixpanel_secret),
+      };
+      const events = await executeMixpanelTool('mixpanel_list_events', {}, creds);
+      eventNames = (Array.isArray(events) ? events : [])
+        .map(e => (typeof e === 'string' ? e : (e?.name ?? null)))
+        .filter(Boolean);
+    } catch { return; }
+
+    const errorKeywords = ['error', 'exception', 'crash', 'fail', 'fault', 'warning'];
+    const candidates = topCandidates(eventNames, errorKeywords);
+    if (candidates.length === 0) {
+      await say({ text: '🎉 *Sarah is ready!* Ask me anything about your product data.' });
+      return;
+    }
+
+    await say({
+      blocks: [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: '🚨 *Last question* — which event represents an *error or problem* in your product?' },
+        },
+        { type: 'actions', elements: makeEventButtons(candidates, 'key_event_error_select') },
+      ],
+      text: 'Key events setup — which is your main error event?',
+    });
+    return;
+  }
+
+  // --- Key Events: error event selected ---
+  if (action.action_id === 'key_event_error_select') {
+    const selected = action.value;
+    const channelId = body.channel?.id || body.container?.channel_id;
+    const messageTs = body.message?.ts;
+
+    if (selected !== '__skip__') {
+      await addEventToDictionary(workspaceId, 'main error event', selected);
+    }
+
+    const confirmText = selected === '__skip__'
+      ? '⏩ Skipped — you can set this later with `set event main error event = EventName`'
+      : `✅ Saved *${selected}* as your main error event.`;
+
+    if (messageTs && channelId) {
+      await client.chat.update({
+        channel: channelId, ts: messageTs,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: confirmText } }],
+        text: confirmText,
+      });
+    }
+
+    // Final summary
+    const ws = await getWorkspace(workspaceId);
+    const dict = ws?.event_dictionary
+      ? (typeof ws.event_dictionary === 'string' ? JSON.parse(ws.event_dictionary) : ws.event_dictionary)
+      : {};
+    const convEvent  = dict['main conversion event'];
+    const errorEvent = selected !== '__skip__' ? selected : dict['main error event'];
+
+    const lines = ['🎉 *Sarah is ready!* Here\'s what I\'ll track:'];
+    if (convEvent)  lines.push(`• Conversion: *${convEvent}*`);
+    if (errorEvent) lines.push(`• Errors: *${errorEvent}*`);
+    lines.push('', '_Ask me: "What\'s our conversion rate this month?" to get started._');
+
+    await say({
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } }],
+      text: lines.join('\n'),
+    });
+    return;
+  }
+
   if (action.action_id === 'mixpanel_connect_confirm') {
     const state = mixpanelSetupState.get(userId);
     if (!state || state.step !== 'confirm') {
@@ -1048,6 +1219,8 @@ export async function handleAction({ action, ack, say, body, context, client }) 
       mixpanelSetupState.delete(userId);
       // Gap 3 — Onboarding Completed (Mixpanel fully connected)
       trackOnboardingCompleted(workspaceId, userId).catch(() => {});
+      // Fire-and-forget key events onboarding (asks about conversion + error events)
+      startKeyEventsOnboarding(workspaceId, say, creds).catch(() => {});
 
       const jiraUrl = JIRA_AUTH_URL(workspaceId, body?.channel?.id || '');
       await say({

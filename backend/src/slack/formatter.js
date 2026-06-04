@@ -330,65 +330,90 @@ export function formatWelcome(workspace, lang = 'en') {
   const hasAnalytics = hasMixpanel || hasAmplitude;
   const hasJira = !!workspace.jira_access_token &&
     (!workspace.jira_expires_at || Date.now() < parseInt(workspace.jira_expires_at));
-  const allConnected = hasAnalytics && (hasJira || hasClickUp);
+  const hasPm = hasJira || hasClickUp;
+  const allConnected = hasAnalytics && hasPm;
 
   const blocks = [
     {
       type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*${greeting}*\n${dayName}, ${dateStr}`,
-      },
+      text: { type: 'mrkdwn', text: `*${greeting}*\n${dayName}, ${dateStr}` },
     },
   ];
 
   // If everything is connected — just greet, nothing more
   if (allConnected) return blocks;
 
-  // Show connect prompt + buttons for missing tools only
   blocks.push({ type: 'divider' });
-  blocks.push({
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: lang === 'he'
-        ? 'כדי להתחיל, חבר את הכלים שלך:'
-        : 'To get started, connect your tools:',
-    },
-  });
 
-  const buttons = [];
-  if (!hasMixpanel) {
-    buttons.push({
-      type: 'button',
-      text: { type: 'plain_text', text: 'Connect Mixpanel' },
-      style: hasAnalytics ? undefined : 'primary', // primary only when no analytics at all
-      action_id: 'welcome_connect_mixpanel',
+  // First-time intro (nothing connected yet)
+  if (!hasAnalytics && !hasPm) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: lang === 'he'
+          ? "היי! אני שרה — עוזרת למנהלי מוצר לנתח דאטה ישירות ב-Slack.\n\nכדי להתחיל, חבר לפחות כלי אחד:"
+          : "Hi! I'm Sarah — helping product managers analyze data directly in Slack.\n\nTo get started, connect at least one tool:",
+      },
     });
-  }
-  if (!hasAmplitude) {
-    buttons.push({
-      type: 'button',
-      text: { type: 'plain_text', text: 'Connect Amplitude' },
-      action_id: 'welcome_connect_amplitude',
-    });
-  }
-  if (!hasClickUp) {
-    buttons.push({
-      type: 'button',
-      text: { type: 'plain_text', text: 'Connect ClickUp' },
-      action_id: 'welcome_connect_clickup',
-    });
-  }
-  if (!hasJira) {
-    buttons.push({
-      type: 'button',
-      text: { type: 'plain_text', text: 'Connect Jira' },
-      action_id: 'welcome_connect_jira',
+  } else {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: lang === 'he' ? 'חבר כלים נוספים:' : 'Connect more tools:',
+      },
     });
   }
 
-  blocks.push({ type: 'actions', elements: buttons });
+  // Analytics section — mutual exclusivity: show only one option if none connected;
+  // if one is already connected, hide both buttons (no need to show)
+  if (!hasAnalytics) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*📊 Analytics:*' },
+    });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Connect Mixpanel' },
+          style: 'primary',
+          action_id: 'welcome_connect_mixpanel',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Connect Amplitude' },
+          action_id: 'welcome_connect_amplitude',
+        },
+      ],
+    });
+  }
+
+  // PM section — show missing tools
+  if (!hasJira || !hasClickUp) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*🎫 Project Management:*' },
+    });
+    const pmButtons = [];
+    if (!hasJira)    pmButtons.push({ type: 'button', text: { type: 'plain_text', text: 'Connect Jira' },    action_id: 'welcome_connect_jira'    });
+    if (!hasClickUp) pmButtons.push({ type: 'button', text: { type: 'plain_text', text: 'Connect ClickUp' }, action_id: 'welcome_connect_clickup' });
+    blocks.push({ type: 'actions', elements: pmButtons });
+  }
+
+  if (!hasAnalytics && !hasPm) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: lang === 'he'
+          ? '_אפשר לחבר כלי אחד או את כולם — שרה עובדת עם מה שיש לך._'
+          : '_You can connect one or all — Sarah works with whatever you have._',
+      },
+    });
+  }
 
   return blocks;
 }

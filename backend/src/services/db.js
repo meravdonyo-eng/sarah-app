@@ -159,6 +159,18 @@ export async function clearAmplitudeCredentials(workspaceId) {
   );
 }
 
+export async function clearMixpanelCredentials(workspaceId) {
+  await pool.query(
+    `UPDATE workspaces
+     SET mixpanel_project_id = NULL,
+         mixpanel_username   = NULL,
+         mixpanel_secret     = NULL,
+         updated_at          = NOW()
+     WHERE workspace_id = $1`,
+    [workspaceId]
+  );
+}
+
 export async function updateWorkspaceJira(workspaceId, { accessToken, refreshToken, cloudId, expiresAt, cloudUrl }) {
   await pool.query(
     `UPDATE workspaces

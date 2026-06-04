@@ -18,6 +18,8 @@ import {
   updateWorkspaceEventDictionary,
   updateWorkspaceSystemPrompt,
   deleteUserAllData,
+  clearAmplitudeCredentials,
+  clearMixpanelCredentials,
 } from '../services/db.js';
 import { sendOwnerAlert, checkApibudget } from '../services/ownerAlerts.js';
 import {
@@ -187,6 +189,19 @@ export async function handleMessage({ message, say, client, context }) {
       await say({ text: 'Mixpanel is already connected ✅\nTo switch to a different project, type *reconnect mixpanel*.' });
       return;
     }
+    if (workspace.amplitude_api_key && workspace.amplitude_secret_key && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
+      await say({
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: "You're already connected to *Amplitude*. Connect Mixpanel instead? This will replace Amplitude." } },
+          { type: 'actions', elements: [
+            { type: 'button', text: { type: 'plain_text', text: 'Yes, replace Amplitude' }, style: 'danger', action_id: 'confirm_connect_mixpanel' },
+            { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'skip_pm_tool' },
+          ]},
+        ],
+        text: "You're already connected to Amplitude.",
+      });
+      return;
+    }
     await startMixpanelStep1(userId, say, workspaceId);
     return;
   }
@@ -203,8 +218,21 @@ export async function handleMessage({ message, say, client, context }) {
 
   if (lower.includes('connect amplitude') || lower.includes('reconnect amplitude') ||
       lower.includes('חבר amplitude') || lower.includes('חיבור amplitude')) {
-    if (workspace.amplitude_api_key && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
+    if (workspace.amplitude_api_key && workspace.amplitude_secret_key && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
       await say({ text: 'Amplitude is already connected ✅\nTo switch to a different project, type *reconnect amplitude*.' });
+      return;
+    }
+    if (workspace.mixpanel_project_id && !lower.includes('reconnect') && !lower.includes('חבר מחדש')) {
+      await say({
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: "You're already connected to *Mixpanel*. Connect Amplitude instead? This will replace Mixpanel." } },
+          { type: 'actions', elements: [
+            { type: 'button', text: { type: 'plain_text', text: 'Yes, replace Mixpanel' }, style: 'danger', action_id: 'confirm_connect_amplitude' },
+            { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'skip_pm_tool' },
+          ]},
+        ],
+        text: "You're already connected to Mixpanel.",
+      });
       return;
     }
     await startAmplitudeStep1(userId, say, workspaceId);
@@ -731,19 +759,20 @@ async function handleAmplitudeSetupStep({ userId, workspaceId, text, say }) {
       });
       amplitudeSetupState.delete(userId);
 
+      const jiraUrlAmp = JIRA_AUTH_URL(workspaceId, '');
       await say({
         blocks: [
           {
             type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: ':white_check_mark: *Amplitude connected successfully!*\n\n' +
-                    'You can now ask questions like:\n' +
-                    '• "What is my 7-day retention?"\n' +
-                    '• "What\'s the conversion from Sign Up to Activation?"\n' +
-                    '• "Which events have the highest daily active users?"\n\n' +
-                    'What would you like to know?',
-            },
+            text: { type: 'mrkdwn', text: ':white_check_mark: *Amplitude connected successfully!*\n\nWell done! Want to connect a project management tool too?' },
+          },
+          {
+            type: 'actions',
+            elements: [
+              { type: 'button', text: { type: 'plain_text', text: 'Connect Jira' }, style: 'primary', url: jiraUrlAmp, action_id: 'connect_jira' },
+              { type: 'button', text: { type: 'plain_text', text: 'Connect ClickUp' }, action_id: 'welcome_connect_clickup' },
+              { type: 'button', text: { type: 'plain_text', text: 'Skip for now' }, action_id: 'skip_pm_tool' },
+            ],
           },
         ],
         text: 'Amplitude connected successfully!',
@@ -837,8 +866,9 @@ async function handleClickUpSetupStep({ userId, workspaceId, text, say }) {
           text: 'ClickUp connected!',
         });
       } else {
-        // Multiple workspaces — ask user to choose
-        const teamList = teams.map((t, i) => `*${i + 1}.* ${t.name} (${t.members_count} members)`).join('\n');
+        // Multiple workspaces — ask user to choose (A, B, C…)
+        const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const teamList = teams.map((t, i) => `${letters[i]}) ${t.name}`).join('\n');
         clickupSetupState.set(userId, { step: 'choose_team', token, teams, workspaceId });
         await say({
           blocks: [
@@ -846,10 +876,7 @@ async function handleClickUpSetupStep({ userId, workspaceId, text, say }) {
               type: 'section',
               text: {
                 type: 'mrkdwn',
-                text: ':white_check_mark: Token valid — *Step 2 of 2*\n\n' +
-                      'Found multiple ClickUp workspaces. Which one should Sarah connect to?\n\n' +
-                      `${teamList}\n\n` +
-                      'Reply with the number (e.g. *1*) or the workspace name:',
+                text: `:white_check_mark: קיבלתי ✓  *Step 2 of 2*\n\nFound ${teams.length} workspaces. Which one would you like to use?\n\n${teamList}\n\nSend the corresponding letter:`,
               },
             },
           ],
@@ -880,12 +907,13 @@ async function handleClickUpSetupStep({ userId, workspaceId, text, say }) {
   if (state.step === 'choose_team') {
     const { token, teams } = state;
     const input = text.trim();
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     let selectedTeam = null;
 
-    // Try numeric selection first
-    const num = parseInt(input, 10);
-    if (!isNaN(num) && num >= 1 && num <= teams.length) {
-      selectedTeam = teams[num - 1];
+    // Try letter selection (A, B, C…)
+    const letterIdx = letters.indexOf(input.toUpperCase());
+    if (letterIdx >= 0 && letterIdx < teams.length) {
+      selectedTeam = teams[letterIdx];
     } else {
       // Try name match (case-insensitive)
       selectedTeam = teams.find(t => t.name.toLowerCase().includes(input.toLowerCase()));
@@ -1094,6 +1122,37 @@ export async function handleAction({ action, ack, say, body, context, client }) 
     return;
   }
 
+  // --- Skip PM tool suggestion ---
+  if (action.action_id === 'skip_pm_tool') {
+    await say({ text: "No problem! You can connect anytime by typing *connect jira* or *connect clickup*." });
+    return;
+  }
+
+  // --- Welcome screen buttons → trigger setup flows ---
+  if (action.action_id === 'welcome_connect_mixpanel' || action.action_id === 'confirm_connect_mixpanel') {
+    const ws = await getWorkspace(workspaceId);
+    // Clear Amplitude if switching
+    if (action.action_id === 'confirm_connect_mixpanel') {
+      await clearAmplitudeCredentials(workspaceId);
+    }
+    await startMixpanelStep1(userId, say, workspaceId);
+    return;
+  }
+
+  if (action.action_id === 'welcome_connect_amplitude' || action.action_id === 'confirm_connect_amplitude') {
+    // Clear Mixpanel if switching
+    if (action.action_id === 'confirm_connect_amplitude') {
+      await clearMixpanelCredentials(workspaceId);
+    }
+    await startAmplitudeStep1(userId, say, workspaceId);
+    return;
+  }
+
+  if (action.action_id === 'welcome_connect_clickup') {
+    await startClickUpStep1(userId, say, workspaceId);
+    return;
+  }
+
   // --- Key Events: conversion event selected ---
   if (action.action_id === 'key_event_conversion_select') {
     const selected = action.value;
@@ -1227,24 +1286,18 @@ export async function handleAction({ action, ack, say, body, context, client }) 
         blocks: [
           {
             type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: ':white_check_mark: *Mixpanel connected successfully!*\n\nGreat work! Now let\'s connect Jira:',
-            },
+            text: { type: 'mrkdwn', text: ':white_check_mark: *Mixpanel connected successfully!*\n\nWell done! Want to connect a project management tool too?' },
           },
           {
             type: 'actions',
             elements: [
-              {
-                type: 'button',
-                text: { type: 'plain_text', text: 'Connect Jira' },
-                style: 'primary',
-                url: jiraUrl,
-                action_id: 'connect_jira',
-              },
+              { type: 'button', text: { type: 'plain_text', text: 'Connect Jira' }, style: 'primary', url: jiraUrl, action_id: 'connect_jira' },
+              { type: 'button', text: { type: 'plain_text', text: 'Connect ClickUp' }, action_id: 'welcome_connect_clickup' },
+              { type: 'button', text: { type: 'plain_text', text: 'Skip for now' }, action_id: 'skip_pm_tool' },
             ],
           },
         ],
+        text: 'Mixpanel connected successfully!',
       });
     } catch (err) {
       // Connection failed — restart the flow

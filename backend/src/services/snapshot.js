@@ -67,6 +67,42 @@ function extractUniqueUsers(result, eventName) {
   }
 }
 
+/**
+ * Extract daily average from a Mixpanel segmentation response.
+ * Used for 7-day baseline: averages each day's unique-user count.
+ */
+function extractDailyAvg(result, eventName) {
+  try {
+    const eventData = result?.data?.values?.[eventName];
+    if (!eventData) return null;
+    const values = Object.values(eventData).map(v => Number(v) || 0);
+    if (values.length === 0) return null;
+    return values.reduce((sum, v) => sum + v, 0) / values.length;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the actual event names to query, using the workspace event_dictionary
+ * if the PM configured key events during onboarding — otherwise fall back to defaults.
+ */
+function resolveEventNames(workspace) {
+  try {
+    const dict = workspace.event_dictionary
+      ? (typeof workspace.event_dictionary === 'string'
+          ? JSON.parse(workspace.event_dictionary)
+          : workspace.event_dictionary)
+      : null;
+    return {
+      conversionEvent: dict?.['main conversion event'] || 'Sign Up Started',
+      errorEvent:      dict?.['main error event']      || 'Error Shown',
+    };
+  } catch {
+    return { conversionEvent: 'Sign Up Started', errorEvent: 'Error Shown' };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Query runner
 // ---------------------------------------------------------------------------
@@ -101,39 +137,43 @@ async function runQueries(workspace) {
     workspaceId:  workspace.workspace_id,
   } : null;
 
+  // Resolve event names from workspace dictionary (falls back to defaults)
+  const { conversionEvent, errorEvent } = resolveEventNames(workspace);
+  console.log(`[Snapshot] events: conversion="${conversionEvent}" error="${errorEvent}"`);
+
   // Build Jira JQL — scope to default project if configured
   const projectFilter = workspace.jira_default_project
     ? `project = "${workspace.jira_default_project}" AND `
     : '';
 
-  // Fire all 4 queries simultaneously — each wrapped with its own timeout
-  const [signUps, errors, jiraUpdated, jiraCreated] = await Promise.all([
+  // Fire all 6 queries simultaneously — each wrapped with its own timeout
+  const [signUps, errors, jiraUpdated, jiraCreated, signUps7dAvg, errors7dAvg] = await Promise.all([
 
-    // Query 1: Sign Up Started — last 24h — unique users
+    // Query 1: conversion event — yesterday — unique users (today's value)
     hasMixpanel
       ? withTimeout(
           executeMixpanelTool('mixpanel_segmentation', {
-            event:     'Sign Up Started',
+            event:     conversionEvent,
             from_date: yesterday,
             to_date:   yesterday,
             unit:      'day',
             type:      'unique',
-          }, mixpanelCreds).then(r => extractUniqueUsers(r, 'Sign Up Started')),
-          `mixpanel_segmentation "Sign Up Started" ${yesterday}`
+          }, mixpanelCreds).then(r => extractUniqueUsers(r, conversionEvent)),
+          `mixpanel_segmentation "${conversionEvent}" ${yesterday}`
         )
       : Promise.resolve(null),
 
-    // Query 2: Error Shown — last 24h — unique users
+    // Query 2: error event — yesterday — unique users (today's value)
     hasMixpanel
       ? withTimeout(
           executeMixpanelTool('mixpanel_segmentation', {
-            event:     'Error Shown',
+            event:     errorEvent,
             from_date: yesterday,
             to_date:   yesterday,
             unit:      'day',
             type:      'unique',
-          }, mixpanelCreds).then(r => extractUniqueUsers(r, 'Error Shown')),
-          `mixpanel_segmentation "Error Shown" ${yesterday}`
+          }, mixpanelCreds).then(r => extractUniqueUsers(r, errorEvent)),
+          `mixpanel_segmentation "${errorEvent}" ${yesterday}`
         )
       : Promise.resolve(null),
 
@@ -156,6 +196,34 @@ async function runQueries(workspace) {
             max_results: 5,
           }, jiraCreds),
           'jira created >= -24h'
+        )
+      : Promise.resolve(null),
+
+    // Query 5: conversion event — 7-day baseline (8 days ago → 2 days ago, excludes yesterday)
+    hasMixpanel
+      ? withTimeout(
+          executeMixpanelTool('mixpanel_segmentation', {
+            event:     conversionEvent,
+            from_date: daysAgo(8),
+            to_date:   daysAgo(2),
+            unit:      'day',
+            type:      'unique',
+          }, mixpanelCreds).then(r => extractDailyAvg(r, conversionEvent)),
+          `mixpanel_segmentation "${conversionEvent}" 7d avg`
+        )
+      : Promise.resolve(null),
+
+    // Query 6: error event — 7-day baseline (8 days ago → 2 days ago, excludes yesterday)
+    hasMixpanel
+      ? withTimeout(
+          executeMixpanelTool('mixpanel_segmentation', {
+            event:     errorEvent,
+            from_date: daysAgo(8),
+            to_date:   daysAgo(2),
+            unit:      'day',
+            type:      'unique',
+          }, mixpanelCreds).then(r => extractDailyAvg(r, errorEvent)),
+          `mixpanel_segmentation "${errorEvent}" 7d avg`
         )
       : Promise.resolve(null),
   ]);
@@ -202,9 +270,9 @@ async function runQueries(workspace) {
     }
   }
 
-  console.log(`[Snapshot] results: signUps=${signUps} errors=${errors} jiraUpdated=${jiraUpdated?.issues?.length ?? 'n/a'} jiraCreated=${jiraCreated?.issues?.length ?? 'n/a'} crossRef=${crossRefAlerts.length}`);
+  console.log(`[Snapshot] results: signUps=${signUps} (7dAvg=${signUps7dAvg?.toFixed(1)}) errors=${errors} (7dAvg=${errors7dAvg?.toFixed(1)}) jiraUpdated=${jiraUpdated?.issues?.length ?? 'n/a'} jiraCreated=${jiraCreated?.issues?.length ?? 'n/a'} crossRef=${crossRefAlerts.length}`);
 
-  return { signUps, errors, jiraUpdated, jiraCreated, crossRefAlerts, hasMixpanel, hasJira };
+  return { signUps, errors, signUps7dAvg, errors7dAvg, jiraUpdated, jiraCreated, crossRefAlerts, hasMixpanel, hasJira, conversionEvent, errorEvent };
 }
 
 // ---------------------------------------------------------------------------
@@ -212,10 +280,39 @@ async function runQueries(workspace) {
 // ---------------------------------------------------------------------------
 
 function buildMessage(results, lang = 'he') {
-  const { signUps, errors, jiraUpdated, jiraCreated, crossRefAlerts, hasMixpanel, hasJira } = results;
+  const { signUps, errors, signUps7dAvg, errors7dAvg,
+          jiraUpdated, jiraCreated, crossRefAlerts,
+          hasMixpanel, hasJira, conversionEvent, errorEvent } = results;
 
-  const signUpsStr = signUps !== null ? String(signUps)              : 'unavailable';
-  const errorsStr  = errors  !== null ? `${errors} users affected`   : 'unavailable';
+  // Anomaly detection
+  const errorSpiked   = errors  !== null && errors7dAvg  !== null && errors  > errors7dAvg  * 1.5;
+  const signUpDropped = signUps !== null && signUps7dAvg !== null && signUps < signUps7dAvg * 0.7;
+
+  // Format conversion line
+  let signUpsLine;
+  if (signUps === null) {
+    signUpsLine = null; // omit entirely — event may not exist in this workspace
+  } else if (signUpDropped) {
+    const avg = Math.round(signUps7dAvg);
+    signUpsLine = lang === 'he'
+      ? `• ⚠️ ${conversionEvent}: ${signUps} — מתחת לממוצע 7 ימים (${avg}). שווה לבדוק.`
+      : `• ⚠️ ${conversionEvent}: ${signUps} — below 7-day avg (${avg}). Worth investigating.`;
+  } else {
+    signUpsLine = `• ${conversionEvent}: ${signUps}`;
+  }
+
+  // Format error line
+  let errorsLine;
+  if (errors === null) {
+    errorsLine = null; // omit entirely
+  } else if (errorSpiked) {
+    const avg = Math.round(errors7dAvg);
+    errorsLine = lang === 'he'
+      ? `• ⚠️ ${errorEvent}: ${errors} משתמשים — מעל ממוצע 7 ימים (${avg}). שווה לבדוק.`
+      : `• ⚠️ ${errorEvent}: ${errors} users — above 7-day avg (${avg}). Worth investigating.`;
+  } else {
+    errorsLine = `• ${errorEvent}: ${errors} users affected`;
+  }
 
   // Merge updated + created tickets, deduplicated, max 3 lines
   const seen = new Set();
@@ -234,7 +331,7 @@ function buildMessage(results, lang = 'he') {
 
   // Cross-ref lines (⚠️ only if errors still firing after fix)
   for (const alert of crossRefAlerts) {
-    jiraLines.push(`• ⚠️ ${alert.ticketKey} — Error Shown still firing (${alert.count} users)`);
+    jiraLines.push(`• ⚠️ ${alert.ticketKey} — ${errorEvent} still firing (${alert.count} users)`);
   }
 
   const hasJiraUpdates = jiraLines.length > 0;
@@ -250,17 +347,13 @@ function buildMessage(results, lang = 'he') {
 
   const question = lang === 'he' ? 'רוצה לצלול לנתון ספציפי?' : 'Anything to dig into?';
 
-  const lines = [
-    greeting,
-    '',
-  ];
+  const lines = [greeting, ''];
 
   // Mixpanel section — only show if at least one metric returned a real value.
-  // "unavailable" on both means the hardcoded event names don't exist in this workspace —
-  // showing two "unavailable" lines adds noise, not value.
-  if (signUps !== null || errors !== null) {
+  if (signUpsLine !== null || errorsLine !== null) {
     lines.push('📊 Last 24h (Mixpanel):');
-    lines.push(`• Sign Ups: ${signUpsStr} | Errors: ${errorsStr}`);
+    if (signUpsLine) lines.push(signUpsLine);
+    if (errorsLine)  lines.push(errorsLine);
   } else if (hasMixpanel) {
     // Mixpanel IS connected but events returned no data — guide the PM
     lines.push(

@@ -115,4 +115,40 @@ router.get('/readmore-debug', async (req, res) => {
   }
 });
 
+// POST /api/admin/monitoring/run — trigger monitoring checks immediately (testing)
+router.post('/monitoring/run', async (req, res) => {
+  try {
+    const { runScheduledChecks } = await import('../services/monitoring.js');
+    console.log('[Admin] Manual monitoring trigger');
+    runScheduledChecks().catch(err => console.error('[Admin] monitoring run error:', err.message));
+    res.json({ status: 'started', message: 'runScheduledChecks() triggered — check Deploy Logs' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/workspaces/:id/monitors — list monitors for a workspace
+router.get('/workspaces/:id/monitors', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM monitor_configs WHERE workspace_id = $1 ORDER BY created_at DESC',
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/workspaces/:id/monitors — insert/upsert a monitor config
+router.post('/workspaces/:id/monitors', async (req, res) => {
+  try {
+    const { upsertMonitor } = await import('../services/monitoringDb.js');
+    await upsertMonitor({ workspaceId: req.params.id, ...req.body });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

@@ -205,17 +205,24 @@ async function shouldFire(anomaly, monitor) {
     return { fire: false, reason: `daily cap reached (${todayCount}/${dailyCap})` };
   }
 
-  // Quiet hours (Phase 1: simple UTC check — full tz awareness in Phase 2)
+  // Quiet hours — timezone-aware (Phase 2)
   if (monitor.quiet_hours) {
-    const nowUTCHour = new Date().getUTCHours();
-    const { from, to } = monitor.quiet_hours; // "HH:MM"
-    const fromH = parseInt(from);
-    const toH   = parseInt(to);
-    const inQuiet = fromH > toH
-      ? (nowUTCHour >= fromH || nowUTCHour < toH)   // overnight: 20:00–08:00
-      : (nowUTCHour >= fromH && nowUTCHour < toH);  // daytime
-    if (inQuiet) {
-      return { fire: false, reason: `quiet hours (${from}–${to} UTC)` };
+    const { from, to, tz = 'UTC' } = monitor.quiet_hours;
+    try {
+      const localHour = parseInt(
+        new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: 'numeric', hour12: false })
+          .format(new Date())
+      );
+      const fromH = parseInt(from);
+      const toH   = parseInt(to);
+      const inQuiet = fromH > toH
+        ? (localHour >= fromH || localHour < toH)   // overnight window e.g. 20:00–08:00
+        : (localHour >= fromH && localHour < toH);  // daytime window
+      if (inQuiet) {
+        return { fire: false, reason: `quiet hours (${from}–${to} ${tz})` };
+      }
+    } catch {
+      // Unknown timezone — skip quiet hours check rather than block alert
     }
   }
 
@@ -364,7 +371,9 @@ async function runMonitor(monitor, workspace) {
   const { fire, reason } = await shouldFire(anomaly, monitor);
   if (!fire) {
     console.log(`${label} suppressed: ${reason}`);
-    return;
+    // Return suppressed anomaly so runScheduledChecks can include it in the daily digest
+    if (reason.startsWith('daily cap')) return { suppressed: anomaly };
+    return null;
   }
 
   // 6. Compose alert (LLM — formats anomaly object only)
@@ -392,6 +401,7 @@ async function runMonitor(monitor, workspace) {
 
   // 8. Record fire (dedup_key + severity ONLY — no metric values)
   await recordFire(monitor.workspace_id, monitor.monitor_id, anomaly.dedup_key, anomaly.severity);
+  return { fired: anomaly };
 }
 
 // ---------------------------------------------------------------------------
@@ -438,12 +448,33 @@ export async function runScheduledChecks() {
       continue;
     }
 
+    const suppressedAnomalies = [];
+
     for (const monitor of wsMonitors) {
       // Isolated try/catch: one monitor failure never blocks the next
       try {
-        await runMonitor(monitor, workspace);
+        const result = await runMonitor(monitor, workspace);
+        if (result?.suppressed) suppressedAnomalies.push({ monitor, anomaly: result.suppressed });
       } catch (err) {
         console.error(`[Monitoring] Unhandled error in monitor ${monitor.monitor_id}:`, err.message);
+      }
+    }
+
+    // Daily digest — post once if any anomalies were suppressed by daily cap
+    if (suppressedAnomalies.length > 0) {
+      const channel = suppressedAnomalies[0].monitor.channel;
+      const lines = [
+        `📋 *Daily cap reached.* ${suppressedAnomalies.length} additional anomaly${suppressedAnomalies.length > 1 ? 'ies' : 'y'} detected but not sent:`,
+        ...suppressedAnomalies.map(({ anomaly }) =>
+          `• *${anomaly.metric_label}* — ${(anomaly.delta_pct * 100).toFixed(1)}% ${anomaly.delta_pct < 0 ? 'drop' : 'spike'} (${anomaly.severity})`
+        ),
+        '_Adjust your daily cap or mute individual monitors to reduce noise._',
+      ];
+      try {
+        await postToSlack(workspace, lines.join('\n'), channel, suppressedAnomalies[0].anomaly);
+        console.log(`[Monitoring] Sent digest: ${suppressedAnomalies.length} suppressed anomalies → ws=${workspaceId}`);
+      } catch (err) {
+        console.warn('[Monitoring] Digest post failed:', err.message);
       }
     }
   }

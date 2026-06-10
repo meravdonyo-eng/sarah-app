@@ -174,6 +174,30 @@ export async function handleMessage({ message, say, client, context }) {
     return;
   }
 
+  // Monitoring mute commands
+  if (lower === 'mute alerts' || lower === 'pause alerts' || lower === 'השתק התראות') {
+    const { muteMonitor, getAllActiveMonitors } = await import('../services/monitoringDb.js');
+    const monitors = (await import('../services/monitoringDb.js')).getAllActiveMonitors
+      ? await (await import('../services/monitoringDb.js')).getActiveMonitors(workspaceId)
+      : [];
+    const until = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await Promise.all(monitors.map(m => muteMonitor(workspaceId, m.monitor_id, until.toISOString())));
+    await say({ text: `🔕 All monitoring alerts muted for 24h (until ${until.toLocaleTimeString()}). Type *unmute alerts* to re-enable.` });
+    return;
+  }
+
+  if (lower === 'unmute alerts' || lower === 'resume alerts' || lower === 'בטל השתקה') {
+    const { muteMonitor, getActiveMonitors } = await import('../services/monitoringDb.js');
+    // Clear muted_until by setting it to past date
+    const { rows } = await (await import('../services/db.js')).default.query(
+      `UPDATE monitor_configs SET muted_until = NULL, status = 'active', updated_at = NOW()
+       WHERE workspace_id = $1 RETURNING monitor_id`, [workspaceId]
+    );
+    const count = rows.length;
+    await say({ text: `✅ Monitoring alerts resumed — ${count} monitor${count !== 1 ? 's' : ''} active.` });
+    return;
+  }
+
   if (lower === 'delete my data' || lower === 'מחק את הנתונים שלי' || lower === 'delete data') {
     await deleteUserAllData(workspaceId, userId);
     await say('✅ Done — all your data has been permanently deleted from Sarah (conversation history, preferences, and activity records).');

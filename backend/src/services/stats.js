@@ -84,19 +84,11 @@ export const STATS_TOOLS = [
         },
         control: {
           type: 'object',
-          description: 'Required for ab_proportion. Must include n (total users) and conversions (converted users).',
-          properties: {
-            n:           { type: 'integer', description: 'Total users in control arm.' },
-            conversions: { type: 'integer', description: 'Converted users in control arm.' },
-          },
+          description: 'Control arm. Shape: { n: integer (total users), conversions: integer (converted users) }.',
         },
         variant: {
           type: 'object',
-          description: 'Required for ab_proportion. Must include n (total users) and conversions (converted users).',
-          properties: {
-            n:           { type: 'integer', description: 'Total users in variant arm.' },
-            conversions: { type: 'integer', description: 'Converted users in variant arm.' },
-          },
+          description: 'Variant arm. Shape: { n: integer (total users), conversions: integer (converted users) }.',
         },
         mde: {
           type: 'number',
@@ -104,24 +96,11 @@ export const STATS_TOOLS = [
         },
         expected_split: {
           type: 'array',
-          items: { type: 'number' },
           description: 'Optional. Designed traffic split [0.5, 0.5] for Sample Ratio Mismatch check.',
         },
         cohorts: {
           type: 'array',
-          description: 'Required for cohort_retention. Each item: { id: string, size: integer, retained_by_period: integer[] }.',
-          items: {
-            type: 'object',
-            properties: {
-              id:   { type: 'string', description: 'Cohort identifier.' },
-              size: { type: 'integer', description: 'Total cohort size.' },
-              retained_by_period: {
-                type: 'array',
-                items: { type: 'integer' },
-                description: 'Count still active per period index (0 = first period).',
-              },
-            },
-          },
+          description: 'Required for cohort_retention. Array of { id: string, size: integer, retained_by_period: integer[] }.',
         },
         source: {
           type: 'string',

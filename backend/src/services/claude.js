@@ -769,6 +769,16 @@ function buildDynamicHeader(workspace) {
   }
   const availableDashboards = dashboards.length > 0 ? dashboards.join(', ') : 'None connected yet';
 
+  // GZ-1: explicitly list NOT-connected tools so Sarah names the gap correctly
+  const notConnected = [];
+  const hasAnalytics = !!workspace.mixpanel_project_id || !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
+  if (!hasAnalytics) notConnected.push('Mixpanel (analytics) — type "connect mixpanel" to connect');
+  if (!jiraConnected) notConnected.push('Jira (issues/tickets) — type "connect jira" to connect');
+  if (!(workspace.clickup_api_token && workspace.clickup_team_id)) notConnected.push('ClickUp (tasks) — type "connect clickup" to connect');
+  const notConnectedLine = notConnected.length > 0
+    ? `NOT connected (GZ-1): ${notConnected.join(' | ')}`
+    : '';
+
   const mixpanelLinkLine = workspace.mixpanel_project_id
     ? 'Mixpanel link placeholder: when you want to provide a direct link to the Mixpanel project dashboard, write [MIXPANEL_LINK] in your response — the system will replace it with a clickable URL. Example: "View the full funnel at [MIXPANEL_LINK]".'
     : '';
@@ -782,6 +792,7 @@ function buildDynamicHeader(workspace) {
     `Timezone: ${timezone}`,
     timeWindows,
     `Connected dashboards: ${availableDashboards}`,
+    notConnectedLine,
     `IMPORTANT: The above "Connected dashboards" list is the ground truth for this session. Ignore any prior conversation history that contradicts it.`,
     mixpanelLinkLine,
     jiraProjectLine,

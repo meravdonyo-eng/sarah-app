@@ -395,10 +395,16 @@ export async function handleMessage({ message, say, client, context }) {
     console.log('[DEBUG:raw] Sarah raw response\n---\n' + result.response + '\n---');
 
     const linkedResponse = injectLinks(result.response, workspace);
+    const responseBlocks = await formatResponseSmart(linkedResponse);
+
+    // GZ-1: if Sarah mentioned a not-connected tool, append a connect button
+    const gz1Block = buildConnectButton(result.response, workspace, workspaceId, channelId);
+    if (gz1Block) responseBlocks.push(gz1Block);
+
     await client.chat.update({
       channel: channelId,
       ts: thinkingMsg.ts,
-      blocks: await formatResponseSmart(linkedResponse),
+      blocks: responseBlocks,
       text: linkedResponse,
     });
 
@@ -574,6 +580,60 @@ async function sayJiraConnect(workspaceId, say, channelId = '') {
     ],
     text: 'Connect Jira',
   });
+}
+
+// ---- GZ-1: Connect button injection ----
+// When Sarah's response mentions a not-connected tool, append a one-click connect button.
+// Avoids asking the PM to type a command — makes GZ-1 real.
+
+function buildConnectButton(responseText, workspace, workspaceId, channelId) {
+  if (!responseText) return null;
+  const lower = responseText.toLowerCase();
+
+  const hasMixpanel  = !!workspace.mixpanel_project_id;
+  const hasAmplitude = !!(workspace.amplitude_api_key && workspace.amplitude_secret_key);
+  const hasAnalytics = hasMixpanel || hasAmplitude;
+
+  // Jira not connected and Sarah mentions it
+  if (!workspace.jira_access_token && (lower.includes('connect jira') || lower.includes('jira isn') || lower.includes('jira is not'))) {
+    const url = JIRA_AUTH_URL(workspaceId, channelId || '');
+    return {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: '🔗 Connect Jira' },
+        style: 'primary',
+        url,
+        action_id: 'connect_jira',
+      }],
+    };
+  }
+
+  // Analytics not connected and Sarah mentions it
+  if (!hasAnalytics && (lower.includes('connect mixpanel') || lower.includes('connect amplitude') ||
+      lower.includes('mixpanel isn') || lower.includes('analytics isn'))) {
+    return {
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: '📊 Connect Mixpanel' }, action_id: 'welcome_connect_mixpanel' },
+        { type: 'button', text: { type: 'plain_text', text: '📊 Connect Amplitude' }, action_id: 'welcome_connect_amplitude' },
+      ],
+    };
+  }
+
+  // ClickUp not connected
+  if (!workspace.clickup_api_token && (lower.includes('connect clickup') || lower.includes('clickup isn'))) {
+    return {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: '✅ Connect ClickUp' },
+        action_id: 'welcome_connect_clickup',
+      }],
+    };
+  }
+
+  return null;
 }
 
 // ---- Key Events Onboarding ----

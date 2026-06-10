@@ -428,46 +428,55 @@ function sanitizeHistory(history) {
  * data from a previous turn biases funnel/behavioral answers.
  *
  * Strategy:
- *   1. Collect IDs of all jira_* tool_use blocks in assistant turns.
- *   2. Remove assistant turns that ONLY contain those tool_use blocks (no text output).
- *   3. Remove user turns whose content consists entirely of tool_result blocks
- *      matching those IDs.
- * Orphaned blocks are cleaned up by the subsequent sanitizeHistory() call.
+ *   Strip ALL jira_/clickup_ tool_use blocks from assistant turns AND their
+ *   corresponding tool_result blocks from user turns. Messages that become
+ *   empty after stripping are removed entirely.
+ *
+ *   Previous approach only removed messages that were EXCLUSIVELY PM tool
+ *   blocks — leaving orphaned tool_use blocks in mixed (text + tool_use)
+ *   assistant messages whose tool_results had been stripped from the next
+ *   user message. Anthropic returns 400 for any tool_use without a
+ *   corresponding tool_result in the immediately following message.
  */
 function purgeStaleJiraResults(history) {
-  // Identify jira_ and clickup_ tool_use IDs from assistant messages.
-  // Both are project-management tools — their raw results contaminate analytics answers
-  // the same way Jira results do (e.g., ClickUp task data biasing funnel interpretation).
+  const isPmTool = (name) => name?.startsWith('jira_') || name?.startsWith('clickup_');
+
+  // Collect all PM tool_use IDs
   const pmToolUseIds = new Set();
   for (const msg of history) {
     if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
-      if (block.type === 'tool_use' &&
-          (block.name?.startsWith('jira_') || block.name?.startsWith('clickup_'))) {
+      if (block.type === 'tool_use' && isPmTool(block.name)) {
         pmToolUseIds.add(block.id);
       }
     }
   }
-  if (pmToolUseIds.size === 0) return history; // nothing to purge
+  if (pmToolUseIds.size === 0) return history;
 
-  return history.filter(msg => {
-    // Remove assistant turn that ONLY contains PM tool_use blocks (no text reply yet)
-    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-      const hasText = msg.content.some(c => c.type === 'text');
-      const hasNonPmTool = msg.content.some(
-        c => c.type === 'tool_use' && !c.name?.startsWith('jira_') && !c.name?.startsWith('clickup_')
-      );
-      if (!hasText && !hasNonPmTool) return false; // pure PM tool_use turn → drop
-    }
-    // Remove user turn that ONLY contains PM tool_result blocks
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      const usefulBlocks = msg.content.filter(
-        c => c.type !== 'tool_result' || !pmToolUseIds.has(c.tool_use_id)
-      );
-      if (usefulBlocks.length === 0) return false; // all blocks are stale PM results → drop
-    }
-    return true;
-  });
+  return history
+    .map(msg => {
+      if (!Array.isArray(msg.content)) return msg;
+
+      if (msg.role === 'assistant') {
+        // Strip ALL PM tool_use blocks — even from mixed (text + tool_use) turns.
+        // Leaving a tool_use without its tool_result causes a 400 on the next request.
+        const stripped = msg.content.filter(b => !(b.type === 'tool_use' && isPmTool(b.name)));
+        if (stripped.length === 0) return null;           // nothing left → drop
+        if (stripped.length === msg.content.length) return msg; // nothing stripped → unchanged
+        return { ...msg, content: stripped };
+      }
+
+      if (msg.role === 'user') {
+        // Strip PM tool_result blocks
+        const stripped = msg.content.filter(b => !(b.type === 'tool_result' && pmToolUseIds.has(b.tool_use_id)));
+        if (stripped.length === 0) return null;           // nothing left → drop
+        if (stripped.length === msg.content.length) return msg;
+        return { ...msg, content: stripped };
+      }
+
+      return msg;
+    })
+    .filter(Boolean); // remove nulled-out messages
 }
 
 // ---------------------------------------------------------------------------

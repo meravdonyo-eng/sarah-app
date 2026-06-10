@@ -3,6 +3,7 @@ import { MIXPANEL_TOOLS, executeMixpanelTool, getMixpanelProjectTimezone } from 
 import { AMPLITUDE_TOOLS, executeAmplitudeTool } from './amplitude.js';
 import { CLICKUP_TOOLS, executeClickupTool } from './clickup.js';
 import { JIRA_TOOLS, executeJiraTool } from './jira.js';
+import { STATS_TOOLS, computeSignificance } from './stats.js';
 import { decrypt } from './encryption.js';
 import { resolveAllIntents, formatResolvedIntents, extractEventNames } from './intentMapper.js';
 import fs from 'fs';
@@ -179,6 +180,9 @@ function buildTools(workspace) {
   if (hasAmplitude) tools.push(...AMPLITUDE_TOOLS);
   if (hasClickUp)   tools.push(...CLICKUP_TOOLS);
   if (isJiraValid(workspace)) tools.push(...JIRA_TOOLS);
+
+  // Stats tool is always available — no external API, pure local compute
+  tools.push(...STATS_TOOLS);
 
   return tools;
 }
@@ -373,6 +377,12 @@ async function executeTool(toolName, args, workspace) {
     };
     return executeJiraTool(toolName, args, creds);
   }
+
+  // Stats tool — pure local compute, no external API or credentials needed
+  if (toolName === 'compute_significance') {
+    return computeSignificance(args);
+  }
+
   throw new Error(`Unknown tool: ${toolName}`);
 }
 

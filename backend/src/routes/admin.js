@@ -115,6 +115,47 @@ router.get('/readmore-debug', async (req, res) => {
   }
 });
 
+// GET /api/admin/zero-input/kpi — zero-input KPI across all workspaces
+router.get('/zero-input/kpi', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days || '30');
+    const { rows } = await pool.query(
+      `SELECT
+         workspace_id,
+         outcome,
+         gap_type,
+         COUNT(*) AS count
+       FROM zero_input_log
+       WHERE logged_at > NOW() - ($1 || ' days')::interval
+       GROUP BY workspace_id, outcome, gap_type
+       ORDER BY workspace_id, count DESC`,
+      [days]
+    );
+
+    // Aggregate KPI per workspace
+    const byWorkspace = {};
+    for (const r of rows) {
+      if (!byWorkspace[r.workspace_id]) byWorkspace[r.workspace_id] = { total: 0, answered: 0, breakdown: [] };
+      const n = parseInt(r.count);
+      byWorkspace[r.workspace_id].total += n;
+      if (r.outcome === 'answered') byWorkspace[r.workspace_id].answered += n;
+      byWorkspace[r.workspace_id].breakdown.push(r);
+    }
+
+    const result = Object.entries(byWorkspace).map(([ws, d]) => ({
+      workspace_id: ws,
+      kpi_pct: d.total > 0 ? parseFloat(((d.answered / d.total) * 100).toFixed(1)) : null,
+      total_queries: d.total,
+      answered: d.answered,
+      breakdown: d.breakdown,
+    }));
+
+    res.json({ period_days: days, workspaces: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/monitoring/run — trigger monitoring checks immediately (testing)
 router.post('/monitoring/run', async (req, res) => {
   try {

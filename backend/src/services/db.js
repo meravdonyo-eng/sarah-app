@@ -108,6 +108,23 @@ export async function initDb() {
 
     CREATE INDEX IF NOT EXISTS monitor_fire_log_dedup
       ON monitor_fire_log(workspace_id, dedup_key, fired_at DESC);
+
+    -- Zero-input KPI: one row per PM query turn
+    -- outcome: answered | named_gap | asked_for_input
+    -- gap_type: connector | instrumentation | empty_window | none
+    CREATE TABLE IF NOT EXISTS zero_input_log (
+      id            SERIAL PRIMARY KEY,
+      workspace_id  TEXT NOT NULL,
+      slack_user_id TEXT,
+      query_type    TEXT,
+      outcome       TEXT NOT NULL,
+      gap_type      TEXT,
+      missing_ref   TEXT,
+      logged_at     TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS zero_input_log_workspace
+      ON zero_input_log(workspace_id, logged_at DESC);
   `);
 
   console.log('DB initialized');

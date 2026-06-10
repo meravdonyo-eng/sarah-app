@@ -34,6 +34,7 @@ import { getCachedSnapshot, setCachedSnapshot } from '../services/snapshotCache.
 import { generateSnapshot } from '../services/snapshot.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectClickUpMandate, detectBaselineQuery, detectFunnelQuestion } from '../services/claude.js';
+import { logQueryOutcome } from '../services/zeroInputLog.js';
 import {
   formatResponse,
   formatResponseSmart,
@@ -399,6 +400,15 @@ export async function handleMessage({ message, say, client, context }) {
       blocks: await formatResponseSmart(linkedResponse),
       text: linkedResponse,
     });
+
+    // Zero-input KPI logging — fire-and-forget, never blocks
+    logQueryOutcome({
+      workspaceId,
+      slackUserId: userId,
+      userMessage: text,
+      responseText: result.response,
+      workspace,
+    }).catch(() => {});
 
     // Gap 2 — Activated: fire once per user on their first successful data answer
     if (result.response && !result.jiraAuthFailed) {

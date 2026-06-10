@@ -266,13 +266,43 @@ async function composeAlert(anomaly) {
 // Step 6 — postToSlack
 // ---------------------------------------------------------------------------
 
-async function postToSlack(workspace, messageText, channelId) {
+async function postToSlack(workspace, messageText, channelId, anomaly) {
   const slack = new WebClient(decrypt(workspace.bot_token));
+
+  // Strip the plain-text footer from the LLM output (we replace it with real buttons)
+  const body = messageText
+    .replace(/\n*_?Mute this alert.*Why am I seeing this\?_?/i, '')
+    .trim();
+
   await slack.chat.postMessage({
     channel: channelId,
-    text:    messageText,
+    text:    body,
     blocks:  [
-      { type: 'section', text: { type: 'mrkdwn', text: messageText } },
+      { type: 'section', text: { type: 'mrkdwn', text: body } },
+      { type: 'divider' },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type:      'button',
+            text:      { type: 'plain_text', text: '🔕 Mute 24h' },
+            action_id: 'monitor_mute',
+            value:     JSON.stringify({ workspace_id: anomaly.workspace_id, monitor_id: anomaly.monitor_id, hours: 24 }),
+          },
+          {
+            type:      'button',
+            text:      { type: 'plain_text', text: '⚙️ Adjust threshold' },
+            action_id: 'monitor_adjust',
+            value:     JSON.stringify({ workspace_id: anomaly.workspace_id, monitor_id: anomaly.monitor_id }),
+          },
+          {
+            type:      'button',
+            text:      { type: 'plain_text', text: '❓ Why am I seeing this?' },
+            action_id: 'monitor_why',
+            value:     JSON.stringify({ monitor_id: anomaly.monitor_id, delta_pct: anomaly.delta_pct, severity: anomaly.severity }),
+          },
+        ],
+      },
     ],
   });
 }
@@ -353,7 +383,7 @@ async function runMonitor(monitor, workspace) {
 
   // 7. Post to Slack
   try {
-    await postToSlack(workspace, alertText, monitor.channel);
+    await postToSlack(workspace, alertText, monitor.channel, anomaly);
     console.log(`${label} posted to channel=${monitor.channel}`);
   } catch (err) {
     console.error(`${label} postToSlack failed:`, err.message);

@@ -1122,6 +1122,41 @@ export async function handleAction({ action, ack, say, body, context, client }) 
     return;
   }
 
+  // --- Monitoring alert buttons ---
+  if (action.action_id === 'monitor_mute') {
+    try {
+      const { muteMonitor } = await import('../services/monitoringDb.js');
+      const { workspace_id: wsId, monitor_id: monId, hours = 24 } = JSON.parse(action.value || '{}');
+      const until = new Date(Date.now() + hours * 60 * 60 * 1000);
+      await muteMonitor(wsId, monId, until.toISOString());
+      await say({ text: `🔕 Monitor *${monId}* muted for ${hours}h (until ${until.toLocaleTimeString()}). Type *connect mixpanel* to re-enable.` });
+    } catch (err) {
+      await say({ text: `Could not mute monitor: ${err.message}` });
+    }
+    return;
+  }
+
+  if (action.action_id === 'monitor_adjust') {
+    const { monitor_id: monId } = JSON.parse(action.value || '{}');
+    await say({
+      text: `⚙️ To adjust the threshold for *${monId}*, contact your Sarah admin or use the API:\n` +
+            `\`threshold: {"type":"pct_change","direction":"both","value":0.20}\` for 20% sensitivity.`,
+    });
+    return;
+  }
+
+  if (action.action_id === 'monitor_why') {
+    const { monitor_id: monId, delta_pct, severity } = JSON.parse(action.value || '{}');
+    const pct = Math.abs(((delta_pct || 0) * 100)).toFixed(1);
+    await say({
+      text: `❓ *Why this alert?*\n` +
+            `Monitor *${monId}* detected a *${pct}% drop* (severity: ${severity}) vs the rolling baseline.\n` +
+            `Sarah fires when the change exceeds the configured threshold (default 10%).\n` +
+            `To mute or adjust sensitivity, use the buttons in the alert.`,
+    });
+    return;
+  }
+
   // --- Skip PM tool suggestion ---
   if (action.action_id === 'skip_pm_tool') {
     await say({ text: "No problem! You can connect anytime by typing *connect jira* or *connect clickup*." });

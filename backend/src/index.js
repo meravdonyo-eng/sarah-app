@@ -80,6 +80,8 @@ app.use((req, res, next) => {
   next();
 });
 
+// Trust Railway's reverse proxy so express-rate-limit reads the correct client IP
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(express.json());

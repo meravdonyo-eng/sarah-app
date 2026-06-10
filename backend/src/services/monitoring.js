@@ -94,22 +94,33 @@ async function fetchMetricWindow(monitor, workspace) {
 // ---------------------------------------------------------------------------
 
 export function computeTrailingWeekdayBaseline(dailyValues, targetDate, window = 4, minN = 100, options = {}) {
-  const targetWeekday = dateWeekday(targetDate);
-
-  const sameWeekday = dailyValues
-    .filter(p => p.date < targetDate && dateWeekday(p.date) === targetWeekday)
-    .sort((a, b) => b.date.localeCompare(a.date)) // newest first
-    .slice(0, window);
-
-  // Require at least 3 points AND each must meet the minimum volume threshold
-  const valid = sameWeekday.filter(p => p.value >= minN);
+  const method    = options?.method ?? 'trailing_weekday';
   const minPoints = options?.min_points ?? 3;
+
+  let candidates;
+
+  if (method === 'rolling_mean') {
+    // Use ALL data points before targetDate — ignores weekday, good for sparse/demo data
+    candidates = dailyValues
+      .filter(p => p.date < targetDate)
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, window * 7); // use up to window×7 days of history
+  } else {
+    // trailing_weekday: only same weekday as targetDate
+    const targetWeekday = dateWeekday(targetDate);
+    candidates = dailyValues
+      .filter(p => p.date < targetDate && dateWeekday(p.date) === targetWeekday)
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, window);
+  }
+
+  const valid = candidates.filter(p => p.value >= minN);
   if (valid.length < minPoints) return null;
 
-  const vals = valid.map(p => p.value);
-  const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
+  const vals     = valid.map(p => p.value);
+  const mean     = vals.reduce((s, v) => s + v, 0) / vals.length;
   const variance = vals.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / vals.length;
-  const std = Math.sqrt(variance);
+  const std      = Math.sqrt(variance);
 
   return { mean, std, n: valid.length, points: valid };
 }
@@ -300,8 +311,10 @@ async function runMonitor(monitor, workspace) {
   const baselineWindow    = monitor.baseline?.window     ?? 4;
   const baselineMinN      = monitor.baseline?.min_n      ?? 100;
   const baselineMinPoints = monitor.baseline?.min_points ?? 3;
+  const baselineMethod    = monitor.baseline?.method     ?? 'trailing_weekday';
   const baseline = computeTrailingWeekdayBaseline(
-    dailyValues, yesterday, baselineWindow, baselineMinN, { min_points: baselineMinPoints }
+    dailyValues, yesterday, baselineWindow, baselineMinN,
+    { min_points: baselineMinPoints, method: baselineMethod }
   );
   if (!baseline) {
     console.log(`${label} insufficient baseline history — skipping`);

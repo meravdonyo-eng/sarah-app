@@ -93,7 +93,7 @@ async function fetchMetricWindow(monitor, workspace) {
 // In-memory only — result discarded after detection.
 // ---------------------------------------------------------------------------
 
-export function computeTrailingWeekdayBaseline(dailyValues, targetDate, window = 4, minN = 100) {
+export function computeTrailingWeekdayBaseline(dailyValues, targetDate, window = 4, minN = 100, options = {}) {
   const targetWeekday = dateWeekday(targetDate);
 
   const sameWeekday = dailyValues
@@ -103,7 +103,8 @@ export function computeTrailingWeekdayBaseline(dailyValues, targetDate, window =
 
   // Require at least 3 points AND each must meet the minimum volume threshold
   const valid = sameWeekday.filter(p => p.value >= minN);
-  if (valid.length < 3) return null;
+  const minPoints = options?.min_points ?? 3;
+  if (valid.length < minPoints) return null;
 
   const vals = valid.map(p => p.value);
   const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
@@ -296,9 +297,12 @@ async function runMonitor(monitor, workspace) {
   const observed = todayPoint.value;
 
   // 3. Compute baseline (same weekday, trailing window)
-  const baselineWindow = monitor.baseline?.window ?? 4;
-  const baselineMinN   = monitor.baseline?.min_n  ?? 100;
-  const baseline = computeTrailingWeekdayBaseline(dailyValues, yesterday, baselineWindow, baselineMinN);
+  const baselineWindow    = monitor.baseline?.window     ?? 4;
+  const baselineMinN      = monitor.baseline?.min_n      ?? 100;
+  const baselineMinPoints = monitor.baseline?.min_points ?? 3;
+  const baseline = computeTrailingWeekdayBaseline(
+    dailyValues, yesterday, baselineWindow, baselineMinN, { min_points: baselineMinPoints }
+  );
   if (!baseline) {
     console.log(`${label} insufficient baseline history — skipping`);
     return;

@@ -11,6 +11,7 @@
 
 import { executeMixpanelTool } from './mixpanel.js';
 import { executeJiraTool } from './jira.js';
+import { executeClickupTool } from './clickup.js';
 import { decrypt } from './encryption.js';
 import { isJiraValid } from './claude.js';
 
@@ -108,14 +109,11 @@ function resolveEventNames(workspace) {
 // ---------------------------------------------------------------------------
 
 async function runQueries(workspace) {
-  const hasMixpanel = !!(
-    workspace.mixpanel_project_id &&
-    workspace.mixpanel_username &&
-    workspace.mixpanel_secret
-  );
-  const hasJira = isJiraValid(workspace);
+  const hasMixpanel  = !!(workspace.mixpanel_project_id && workspace.mixpanel_username && workspace.mixpanel_secret);
+  const hasJira      = isJiraValid(workspace);
+  const hasClickUp   = !!(workspace.clickup_api_token && workspace.clickup_team_id);
 
-  console.log(`[Snapshot] runQueries wsId=${workspace.workspace_id} hasMixpanel=${hasMixpanel} hasJira=${hasJira}`);
+  console.log(`[Snapshot] runQueries wsId=${workspace.workspace_id} hasMixpanel=${hasMixpanel} hasJira=${hasJira} hasClickUp=${hasClickUp}`);
 
   const yesterday = daysAgo(1);
 
@@ -147,7 +145,7 @@ async function runQueries(workspace) {
     : '';
 
   // Fire all 6 queries simultaneously — each wrapped with its own timeout
-  const [signUps, errors, jiraUpdated, jiraCreated, signUps7dAvg, errors7dAvg] = await Promise.all([
+  const [signUps, errors, jiraUpdated, jiraCreated, signUps7dAvg, errors7dAvg, clickupUpdated, clickupUrgent] = await Promise.all([
 
     // Query 1: conversion event — yesterday — unique users (today's value)
     hasMixpanel
@@ -226,6 +224,31 @@ async function runQueries(workspace) {
           `mixpanel_segmentation "${errorEvent}" 7d avg`
         )
       : Promise.resolve(null),
+
+    // Query 7: ClickUp — tasks updated in last 24h
+    hasClickUp
+      ? withTimeout(
+          executeClickupTool('clickup_search_tasks', {
+            updated_since:  yesterday,
+            include_closed: false,
+            max_results:    10,
+          }, { token: decrypt(workspace.clickup_api_token), teamId: workspace.clickup_team_id }),
+          'clickup updated >= -24h'
+        )
+      : Promise.resolve(null),
+
+    // Query 8: ClickUp — urgent/high tasks created in last 24h
+    hasClickUp
+      ? withTimeout(
+          executeClickupTool('clickup_search_tasks', {
+            created_since:  yesterday,
+            priority:       'urgent',
+            include_closed: false,
+            max_results:    5,
+          }, { token: decrypt(workspace.clickup_api_token), teamId: workspace.clickup_team_id }),
+          'clickup created urgent >= -24h'
+        )
+      : Promise.resolve(null),
   ]);
 
   // Cross-reference: Done tickets → check if related errors still fire in Mixpanel
@@ -270,9 +293,9 @@ async function runQueries(workspace) {
     }
   }
 
-  console.log(`[Snapshot] results: signUps=${signUps} (7dAvg=${signUps7dAvg?.toFixed(1)}) errors=${errors} (7dAvg=${errors7dAvg?.toFixed(1)}) jiraUpdated=${jiraUpdated?.issues?.length ?? 'n/a'} jiraCreated=${jiraCreated?.issues?.length ?? 'n/a'} crossRef=${crossRefAlerts.length}`);
+  console.log(`[Snapshot] results: signUps=${signUps} (7dAvg=${signUps7dAvg?.toFixed(1)}) errors=${errors} (7dAvg=${errors7dAvg?.toFixed(1)}) jiraUpdated=${jiraUpdated?.issues?.length ?? 'n/a'} jiraCreated=${jiraCreated?.issues?.length ?? 'n/a'} clickupUpdated=${clickupUpdated?.total ?? 'n/a'} crossRef=${crossRefAlerts.length}`);
 
-  return { signUps, errors, signUps7dAvg, errors7dAvg, jiraUpdated, jiraCreated, crossRefAlerts, hasMixpanel, hasJira, conversionEvent, errorEvent };
+  return { signUps, errors, signUps7dAvg, errors7dAvg, jiraUpdated, jiraCreated, clickupUpdated, clickupUrgent, crossRefAlerts, hasMixpanel, hasJira, hasClickUp, conversionEvent, errorEvent };
 }
 
 // ---------------------------------------------------------------------------
@@ -281,8 +304,9 @@ async function runQueries(workspace) {
 
 function buildMessage(results, lang = 'he') {
   const { signUps, errors, signUps7dAvg, errors7dAvg,
-          jiraUpdated, jiraCreated, crossRefAlerts,
-          hasMixpanel, hasJira, conversionEvent, errorEvent } = results;
+          jiraUpdated, jiraCreated, clickupUpdated, clickupUrgent,
+          crossRefAlerts, hasMixpanel, hasJira, hasClickUp,
+          conversionEvent, errorEvent } = results;
 
   // Anomaly detection
   const errorSpiked   = errors  !== null && errors7dAvg  !== null && errors  > errors7dAvg  * 1.5;
@@ -368,13 +392,30 @@ function buildMessage(results, lang = 'he') {
     lines.push('🎫 Jira (last 24h):');
     lines.push(...jiraLines);
   } else if (!hasJira) {
-    // Jira not connected — nudge the PM so they know it's available
     lines.push('');
     lines.push(
       lang === 'he'
         ? '🔗 Jira לא מחובר — כתוב *connect jira* כדי לחבר'
         : '🔗 Jira not connected — type *connect jira* to set it up'
     );
+  }
+
+  // ClickUp section
+  const clickupTasks = [
+    ...(clickupUrgent?.tasks || []),
+    ...(clickupUpdated?.tasks || []),
+  ].filter((t, i, arr) => arr.findIndex(x => x.id === t.id) === i).slice(0, 3);
+
+  if (clickupTasks.length > 0) {
+    lines.push('');
+    lines.push('✅ ClickUp (last 24h):');
+    for (const t of clickupTasks) {
+      const pri = t.priority ? ` · ${t.priority}` : '';
+      lines.push(`• ${t.name}${pri} — ${t.status || 'open'}`);
+    }
+  } else if (hasClickUp) {
+    lines.push('');
+    lines.push('✅ ClickUp: no high-priority task changes in the last 24h');
   }
 
   lines.push('');

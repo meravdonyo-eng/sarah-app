@@ -115,6 +115,20 @@ router.get('/readmore-debug', async (req, res) => {
   }
 });
 
+// POST /api/admin/workspaces/:id/morning-channel — configure daily briefing channel
+router.post('/workspaces/:id/morning-channel', async (req, res) => {
+  try {
+    const { channel } = req.body;
+    await pool.query(
+      `UPDATE workspaces SET morning_channel = $2, updated_at = NOW() WHERE workspace_id = $1`,
+      [req.params.id, channel || null]
+    );
+    res.json({ success: true, morning_channel: channel });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/zero-input/kpi — zero-input KPI across all workspaces
 router.get('/zero-input/kpi', async (req, res) => {
   try {

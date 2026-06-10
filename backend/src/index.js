@@ -9,6 +9,7 @@ import pkg from '@slack/bolt';
 const { App, ExpressReceiver } = pkg;
 import { initDb, getWorkspace, deleteOldConversations } from './services/db.js';
 import { runScheduledChecks } from './services/monitoring.js';
+import { generateSnapshot } from './services/snapshot.js';
 import { decrypt } from './services/encryption.js';
 import { handleMessage, handleAppMention, handleAction, handleAppHomeOpened, handleSarahCommand, handleSarahSettingsSubmission } from './slack/handlers.js';
 import { startTokenRefreshDaemon } from './services/ownerAlerts.js';
@@ -159,6 +160,41 @@ async function start() {
   }
   runRetentionCleanup();
   setInterval(runRetentionCleanup, 24 * 60 * 60 * 1000);
+
+  // Morning briefing — daily snapshot at ~07:00 UTC (10:00 Israel)
+  let morningLastRunDate = null;
+  setInterval(async () => {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    const utcMin  = now.getUTCMinutes();
+    const today   = now.toISOString().split('T')[0];
+    if (utcHour === 7 && utcMin < 5 && morningLastRunDate !== today) {
+      morningLastRunDate = today;
+      try {
+        const { rows } = await import('./services/db.js').then(m =>
+          m.default.query(`SELECT * FROM workspaces WHERE morning_channel IS NOT NULL`)
+        );
+        for (const ws of rows) {
+          try {
+            const text = await generateSnapshot(ws, 'en');
+            if (!text) continue;
+            const { WebClient } = await import('@slack/web-api');
+            const slack = new WebClient((await import('./services/encryption.js')).decrypt(ws.bot_token));
+            await slack.chat.postMessage({
+              channel: ws.morning_channel,
+              text,
+              blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+            });
+            console.log(`[MorningBriefing] Sent to ws=${ws.workspace_id} channel=${ws.morning_channel}`);
+          } catch (err) {
+            console.error(`[MorningBriefing] Failed for ws=${ws.workspace_id}:`, err.message);
+          }
+        }
+      } catch (err) {
+        console.error('[MorningBriefing] Run failed:', err.message);
+      }
+    }
+  }, 5 * 60 * 1000);
 
   // Proactive monitoring — daily check at ~09:00 UTC
   // Polls every 5 minutes; fires once per calendar day when the UTC hour is 9.

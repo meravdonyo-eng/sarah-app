@@ -61,6 +61,7 @@ export async function initDb() {
 
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_default_project TEXT;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS jira_cloud_url TEXT;
+    ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS morning_channel TEXT;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS event_dictionary JSONB;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS amplitude_api_key TEXT;
     ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS amplitude_secret_key TEXT;

@@ -75,6 +75,39 @@ export async function initDb() {
       cost_usd      NUMERIC(10,6) NOT NULL DEFAULT 0,
       PRIMARY KEY (workspace_id, month)
     );
+
+    -- Proactive monitoring: per-workspace metric monitor configurations
+    CREATE TABLE IF NOT EXISTS monitor_configs (
+      workspace_id   TEXT NOT NULL REFERENCES workspaces(workspace_id),
+      monitor_id     TEXT NOT NULL,
+      metric_label   TEXT,
+      metric         JSONB NOT NULL,
+      baseline       JSONB NOT NULL DEFAULT '{"method":"trailing_weekday","window":4}',
+      threshold      JSONB NOT NULL DEFAULT '{"type":"pct_change","direction":"both","value":0.10}',
+      schedule       TEXT NOT NULL DEFAULT 'daily_09:00',
+      channel        TEXT NOT NULL,
+      quiet_hours    JSONB,
+      daily_cap      INTEGER NOT NULL DEFAULT 3,
+      cooldown_hours INTEGER NOT NULL DEFAULT 24,
+      status         TEXT NOT NULL DEFAULT 'active',
+      muted_until    TIMESTAMPTZ,
+      created_at     TIMESTAMPTZ DEFAULT NOW(),
+      updated_at     TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (workspace_id, monitor_id)
+    );
+
+    -- Proactive monitoring: fire log — dedup_key + severity ONLY, NO metric values
+    CREATE TABLE IF NOT EXISTS monitor_fire_log (
+      id            SERIAL PRIMARY KEY,
+      workspace_id  TEXT NOT NULL,
+      monitor_id    TEXT NOT NULL,
+      dedup_key     TEXT NOT NULL,
+      severity      TEXT NOT NULL,
+      fired_at      TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS monitor_fire_log_dedup
+      ON monitor_fire_log(workspace_id, dedup_key, fired_at DESC);
   `);
 
   console.log('DB initialized');

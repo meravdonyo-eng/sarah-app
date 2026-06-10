@@ -8,6 +8,7 @@ import { dirname, join } from 'path';
 import pkg from '@slack/bolt';
 const { App, ExpressReceiver } = pkg;
 import { initDb, getWorkspace, deleteOldConversations } from './services/db.js';
+import { runScheduledChecks } from './services/monitoring.js';
 import { decrypt } from './services/encryption.js';
 import { handleMessage, handleAppMention, handleAction, handleAppHomeOpened, handleSarahCommand, handleSarahSettingsSubmission } from './slack/handlers.js';
 import { startTokenRefreshDaemon } from './services/ownerAlerts.js';
@@ -156,6 +157,24 @@ async function start() {
   }
   runRetentionCleanup();
   setInterval(runRetentionCleanup, 24 * 60 * 60 * 1000);
+
+  // Proactive monitoring — daily check at ~09:00 UTC
+  // Polls every 5 minutes; fires once per calendar day when the UTC hour is 9.
+  let monitoringLastRunDate = null;
+  setInterval(async () => {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    const utcMin  = now.getUTCMinutes();
+    const today   = now.toISOString().split('T')[0];
+    if (utcHour === 9 && utcMin < 5 && monitoringLastRunDate !== today) {
+      monitoringLastRunDate = today;
+      try {
+        await runScheduledChecks();
+      } catch (err) {
+        console.error('[Monitoring] Cron run failed:', err.message);
+      }
+    }
+  }, 5 * 60 * 1000); // check every 5 minutes
 }
 
 start().catch((err) => {

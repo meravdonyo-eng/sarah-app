@@ -12,6 +12,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { WebClient } from '@slack/web-api';
 import { executeMixpanelTool } from './mixpanel.js';
+import { executeJiraTool } from './jira.js';
+import { isJiraValid } from './claude.js';
 import { decrypt } from './encryption.js';
 import { getAllActiveMonitors, recordFire, wasFiredWithin, getDailyFireCount } from './monitoringDb.js';
 import { getWorkspace } from './db.js';
@@ -315,6 +317,58 @@ async function postToSlack(workspace, messageText, channelId, anomaly) {
 }
 
 // ---------------------------------------------------------------------------
+// Step 5.5 — enrichAnomaly (Phase 3)
+// Pulls Jira issues from the same time window as the anomaly.
+// CORRELATION ONLY — no shared user ID → never claim causation.
+// Only runs if Jira is connected for this workspace.
+// ---------------------------------------------------------------------------
+
+async function enrichAnomaly(anomaly, workspace) {
+  const enrichment = { jira: null };
+
+  if (!isJiraValid(workspace)) return enrichment;
+
+  try {
+    const jiraCreds = {
+      accessToken:  decrypt(workspace.jira_access_token),
+      refreshToken: decrypt(workspace.jira_refresh_token),
+      cloudId:      workspace.jira_cloud_id,
+      expiresAt:    workspace.jira_expires_at,
+      workspaceId:  workspace.workspace_id,
+    };
+
+    const projectFilter = workspace.jira_default_project
+      ? `project = "${workspace.jira_default_project}" AND `
+      : '';
+
+    const { from } = anomaly.window;
+    const jql = `${projectFilter}(created >= "${from}" OR updated >= "${from}") ORDER BY priority ASC`;
+
+    const result = await executeJiraTool('jira_search_issues', { jql, max_results: 10 }, jiraCreds);
+    const issues = result?.issues || [];
+
+    // Filter to high-priority issues only to reduce noise
+    const highPri = ['highest', 'high', 'urgent', 'critical', 'p1', 'p2'];
+    const filtered = issues
+      .filter(i => highPri.includes((i.fields?.priority?.name || '').toLowerCase()))
+      .slice(0, 3)
+      .map(i => ({
+        key:      i.key,
+        priority: i.fields?.priority?.name || 'unknown',
+        created:  (i.fields?.created || '').split('T')[0],
+        summary:  (i.fields?.summary || '').slice(0, 80),
+        status:   i.fields?.status?.name || 'unknown',
+      }));
+
+    if (filtered.length > 0) enrichment.jira = filtered;
+  } catch (err) {
+    console.warn(`[Monitor] enrichAnomaly Jira failed: ${err.message}`);
+  }
+
+  return enrichment;
+}
+
+// ---------------------------------------------------------------------------
 // runMonitor — per-monitor orchestrator
 // ---------------------------------------------------------------------------
 
@@ -374,6 +428,12 @@ async function runMonitor(monitor, workspace) {
     // Return suppressed anomaly so runScheduledChecks can include it in the daily digest
     if (reason.startsWith('daily cap')) return { suppressed: anomaly };
     return null;
+  }
+
+  // 5.5. Enrich with Jira context (correlation only — same time window)
+  anomaly.enrichment = await enrichAnomaly(anomaly, workspace);
+  if (anomaly.enrichment?.jira?.length > 0) {
+    console.log(`${label} enriched: ${anomaly.enrichment.jira.length} Jira issue(s) in window`);
   }
 
   // 6. Compose alert (LLM — formats anomaly object only)

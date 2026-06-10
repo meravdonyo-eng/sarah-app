@@ -297,7 +297,8 @@ async function runMonitor(monitor, workspace) {
 
   // 3. Compute baseline (same weekday, trailing window)
   const baselineWindow = monitor.baseline?.window ?? 4;
-  const baseline = computeTrailingWeekdayBaseline(dailyValues, yesterday, baselineWindow);
+  const baselineMinN   = monitor.baseline?.min_n  ?? 100;
+  const baseline = computeTrailingWeekdayBaseline(dailyValues, yesterday, baselineWindow, baselineMinN);
   if (!baseline) {
     console.log(`${label} insufficient baseline history — skipping`);
     return;

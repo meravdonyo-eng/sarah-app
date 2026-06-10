@@ -4,7 +4,7 @@ import { AMPLITUDE_TOOLS, executeAmplitudeTool } from './amplitude.js';
 import { CLICKUP_TOOLS, executeClickupTool } from './clickup.js';
 import { JIRA_TOOLS, executeJiraTool } from './jira.js';
 import { STATS_TOOLS, computeSignificance } from './stats.js';
-import { getRelevantHistory, formatHistoryContext } from './interactionStore.js';
+import { getRelevantHistory, formatHistoryContext, detectThenVsNow, formatThenVsNowContext } from './interactionStore.js';
 import { decrypt } from './encryption.js';
 import { resolveAllIntents, formatResolvedIntents, extractEventNames } from './intentMapper.js';
 import fs from 'fs';
@@ -1147,6 +1147,14 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         workspace.workspace_id, options.slackUserId, userMessage, workspace
       );
       historyContext = formatHistoryContext(priorHistory);
+
+      // Then-vs-now: if the question asks for comparison, add explicit re-fetch instructions
+      if (priorHistory.length > 0 && detectThenVsNow(userMessage)) {
+        const mostRelevant = priorHistory[0];
+        const thenVsNow = formatThenVsNowContext(mostRelevant);
+        if (thenVsNow) historyContext = historyContext + '\n\n' + thenVsNow;
+        console.log(`[Continuity] Then-vs-now detected — prior date=${new Date(mostRelevant.ts).toISOString().split('T')[0]}`);
+      }
     } catch { /* never block the response */ }
   }
 

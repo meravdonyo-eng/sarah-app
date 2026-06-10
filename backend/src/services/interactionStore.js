@@ -203,6 +203,47 @@ export function formatHistoryContext(interactions) {
 }
 
 // ---------------------------------------------------------------------------
+// Then-vs-now: detect comparison intent + build live re-fetch context
+// ---------------------------------------------------------------------------
+
+const THEN_VS_NOW_PATTERNS = [
+  'compared to last time', 'vs last time', 'since last time',
+  'how has it changed', 'has it changed', 'still the same', 'still dropping',
+  'still improving', 'better now', 'worse now', 'improved since',
+  'לעומת פעם', 'בהשוואה לפעם', 'השתנה מאז', 'עדיין',
+  'last time we checked', 'since we spoke', 'update on',
+];
+
+export function detectThenVsNow(queryText) {
+  const lower = queryText.toLowerCase();
+  return THEN_VS_NOW_PATTERNS.some(p => lower.includes(p));
+}
+
+/**
+ * Build then-vs-now context block for injection into Block 3.
+ * Supplies the prior interaction date so Sarah knows which window to re-fetch.
+ * Values are NEVER stored here — Sarah re-fetches both windows live.
+ */
+export function formatThenVsNowContext(priorInteraction) {
+  if (!priorInteraction) return '';
+  const priorDate = new Date(priorInteraction.ts).toISOString().split('T')[0];
+  const when = new Date(priorInteraction.ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+
+  return [
+    '--- THEN-VS-NOW COMPARISON REQUESTED ---',
+    `Prior interaction date: ${priorDate} (${when})`,
+    `Metric: ${priorInteraction.metric_ref || 'see prior interaction above'}`,
+    '',
+    'MANDATORY: Re-fetch BOTH windows live before answering:',
+    `  1. THEN window: date range anchored to ${priorDate} (same metric, same period length)`,
+    '  2. NOW window: current period (same metric, same period length)',
+    'Present both values with source citations. Label clearly: "Then (${when}):" and "Now:".',
+    'DO NOT use any value from the prior interaction block — qualitative notes only, no metric values stored.',
+    '--- END THEN-VS-NOW ---',
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // GDPR: delete all interactions for a user
 // (called from deleteUserAllData in db.js)
 // ---------------------------------------------------------------------------

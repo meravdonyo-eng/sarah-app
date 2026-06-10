@@ -35,6 +35,7 @@ import { generateSnapshot } from '../services/snapshot.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { sendMessageWithTools, isJiraValid, detectJiraMandate, detectClickUpMandate, detectBaselineQuery, detectFunnelQuestion } from '../services/claude.js';
 import { logQueryOutcome } from '../services/zeroInputLog.js';
+import { saveInteraction } from '../services/interactionStore.js';
 import {
   formatResponse,
   formatResponseSmart,
@@ -369,7 +370,7 @@ export async function handleMessage({ message, say, client, context }) {
   await enqueueForUser(userId, async () => {
   try {
     const history = await getConversationHistory(workspaceId, userId, channelId);
-    const result = await sendMessageWithTools(workspace, text, history, abortController.signal);
+    const result = await sendMessageWithTools(workspace, text, history, abortController.signal, { slackUserId: userId });
     activeRequests.delete(userId);
     await saveConversationHistory(workspaceId, userId, channelId, result.conversationHistory);
 
@@ -400,6 +401,15 @@ export async function handleMessage({ message, say, client, context }) {
       blocks: await formatResponseSmart(linkedResponse),
       text: linkedResponse,
     });
+
+    // Interaction store — save metadata for continuity context (qualitative only, no metric values)
+    saveInteraction({
+      workspaceId,
+      userId,
+      queryText: text,
+      sarahResponse: result.response,
+      workspace,
+    }).catch(() => {});
 
     // Zero-input KPI logging — fire-and-forget, never blocks
     logQueryOutcome({

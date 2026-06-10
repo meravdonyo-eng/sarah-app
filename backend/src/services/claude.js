@@ -4,6 +4,7 @@ import { AMPLITUDE_TOOLS, executeAmplitudeTool } from './amplitude.js';
 import { CLICKUP_TOOLS, executeClickupTool } from './clickup.js';
 import { JIRA_TOOLS, executeJiraTool } from './jira.js';
 import { STATS_TOOLS, computeSignificance } from './stats.js';
+import { getRelevantHistory, formatHistoryContext } from './interactionStore.js';
 import { decrypt } from './encryption.js';
 import { resolveAllIntents, formatResolvedIntents, extractEventNames } from './intentMapper.js';
 import fs from 'fs';
@@ -1136,7 +1137,20 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   //  Block 3 (fresh)     — datetime, connected dashboards, per-message addons,
   //                        step-scoped context (per-question) → always fresh, never cached
   const staticSystemText = basePrompt;
-  const freshSystemText = [dynamicHeader, messageAddons, stepScopedContext].filter(Boolean).join('\n\n');
+
+  // Fetch prior interactions for this user — goes in Block 3 (fresh, never cached)
+  // Skip for internal/snapshot calls (options.slackUserId not set)
+  let historyContext = '';
+  if (options.slackUserId && !options.skipHistory) {
+    try {
+      const priorHistory = await getRelevantHistory(
+        workspace.workspace_id, options.slackUserId, userMessage, workspace
+      );
+      historyContext = formatHistoryContext(priorHistory);
+    } catch { /* never block the response */ }
+  }
+
+  const freshSystemText = [dynamicHeader, messageAddons, stepScopedContext, historyContext].filter(Boolean).join('\n\n');
 
   const systemBlocks = [
     {

@@ -125,6 +125,28 @@ export async function initDb() {
 
     CREATE INDEX IF NOT EXISTS zero_input_log_workspace
       ON zero_input_log(workspace_id, logged_at DESC);
+
+    -- Interaction store: per-user query metadata for continuity context.
+    -- MUST NOT contain metric values or user-level product data — qualitative only.
+    -- Retained 90 days (same policy as conversations). Covered by GDPR erasure.
+    CREATE TABLE IF NOT EXISTS user_interactions (
+      interaction_id TEXT        NOT NULL DEFAULT gen_random_uuid()::text,
+      workspace_id   TEXT        NOT NULL REFERENCES workspaces(workspace_id),
+      user_id        TEXT        NOT NULL,
+      ts             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      query_text     TEXT        NOT NULL,
+      metric_ref     TEXT,        -- e.g. "mixpanel.funnel.checkout"
+      topic_tags     TEXT[],      -- e.g. ARRAY['conversion','checkout']
+      sarah_notes    TEXT,        -- qualitative framing only, NO metric values
+      PRIMARY KEY (workspace_id, user_id, interaction_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS user_interactions_lookup
+      ON user_interactions(workspace_id, user_id, ts DESC);
+
+    CREATE INDEX IF NOT EXISTS user_interactions_metric
+      ON user_interactions(workspace_id, metric_ref)
+      WHERE metric_ref IS NOT NULL;
   `);
 
   console.log('DB initialized');
@@ -435,6 +457,14 @@ export async function deleteUserAllData(workspaceId, slackUserId) {
   );
   await pool.query(
     'DELETE FROM user_flags WHERE workspace_id = $1 AND slack_user_id = $2',
+    [workspaceId, slackUserId]
+  );
+  await pool.query(
+    'DELETE FROM user_interactions WHERE workspace_id = $1 AND user_id = $2',
+    [workspaceId, slackUserId]
+  );
+  await pool.query(
+    'DELETE FROM zero_input_log WHERE workspace_id = $1 AND slack_user_id = $2',
     [workspaceId, slackUserId]
   );
 }

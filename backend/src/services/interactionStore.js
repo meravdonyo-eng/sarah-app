@@ -219,28 +219,91 @@ export function detectThenVsNow(queryText) {
   return THEN_VS_NOW_PATTERNS.some(p => lower.includes(p));
 }
 
+// ---------------------------------------------------------------------------
+// Metric ref → tool mapping
+// Maps stored metric_ref to specific Mixpanel/Jira tool + call template
+// ---------------------------------------------------------------------------
+
+const METRIC_TOOL_MAP = {
+  'mixpanel.funnel.main':       { tool: 'mixpanel_funnel',       hint: 'Use the main funnel (from mixpanel_list_funnels). Pass from_date + to_date.' },
+  'mixpanel.funnel.activation': { tool: 'mixpanel_funnel',       hint: 'Use the activation funnel (from mixpanel_list_funnels). Pass from_date + to_date.' },
+  'mixpanel.retention':         { tool: 'mixpanel_retention',    hint: 'Pass from_date + to_date.' },
+  'mixpanel.event.error_shown': { tool: 'mixpanel_segmentation', hint: 'Use event="Error Shown" (or the configured error event), type="unique", unit="day".' },
+  'jira.issues':                { tool: 'jira_search_issues',    hint: 'Use JQL: updated >= "from_date" AND updated <= "to_date".' },
+};
+
+function formatDate(d) { return d.toISOString().split('T')[0]; }
+
 /**
- * Build then-vs-now context block for injection into Block 3.
- * Supplies the prior interaction date so Sarah knows which window to re-fetch.
+ * Compute THEN and NOW windows for a then-vs-now comparison.
+ * Both windows are 7 days (configurable via windowDays).
+ *   THEN: 7-day window ending on the prior interaction date
+ *   NOW:  last 7 days ending yesterday
+ */
+function computeWindows(priorDate, windowDays = 7) {
+  const anchor = new Date(priorDate + 'T12:00:00Z');
+  const yesterday = new Date(Date.now() - 86400000);
+
+  const thenEnd   = anchor;
+  const thenStart = new Date(anchor.getTime() - (windowDays - 1) * 86400000);
+  const nowEnd    = yesterday;
+  const nowStart  = new Date(yesterday.getTime() - (windowDays - 1) * 86400000);
+
+  return {
+    then: { from: formatDate(thenStart), to: formatDate(thenEnd) },
+    now:  { from: formatDate(nowStart),  to: formatDate(nowEnd)  },
+  };
+}
+
+/**
+ * Build then-vs-now context block for injection into Block 3. Phase 3:
+ * - Computes exact THEN + NOW date windows
+ * - Maps metric_ref to the correct tool + call template
+ * - Sarah executes: two live tool calls, then compares
  * Values are NEVER stored here — Sarah re-fetches both windows live.
  */
 export function formatThenVsNowContext(priorInteraction) {
   if (!priorInteraction) return '';
+
   const priorDate = new Date(priorInteraction.ts).toISOString().split('T')[0];
   const when = new Date(priorInteraction.ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const { then, now } = computeWindows(priorDate);
 
-  return [
-    '--- THEN-VS-NOW COMPARISON REQUESTED ---',
-    `Prior interaction date: ${priorDate} (${when})`,
-    `Metric: ${priorInteraction.metric_ref || 'see prior interaction above'}`,
+  const metricRef = priorInteraction.metric_ref || null;
+  const toolHint  = metricRef ? (METRIC_TOOL_MAP[metricRef] || null) : null;
+
+  const lines = [
+    '--- THEN-VS-NOW COMPARISON (Phase 3) ---',
+    `Prior interaction: ${when} | Metric: ${metricRef || 'see prior interaction'}`,
     '',
-    'MANDATORY: Re-fetch BOTH windows live before answering:',
-    `  1. THEN window: date range anchored to ${priorDate} (same metric, same period length)`,
-    '  2. NOW window: current period (same metric, same period length)',
-    'Present both values with source citations. Label clearly: "Then (${when}):" and "Now:".',
-    'DO NOT use any value from the prior interaction block — qualitative notes only, no metric values stored.',
-    '--- END THEN-VS-NOW ---',
-  ].join('\n');
+    '📅 Computed date windows (use EXACTLY these):',
+    `  THEN window: from_date=${then.from}  to_date=${then.to}  (7 days ending on prior date)`,
+    `  NOW  window: from_date=${now.from}  to_date=${now.to}  (last 7 days)`,
+    '',
+    '🔧 Required tool calls — execute BOTH before answering:',
+  ];
+
+  if (toolHint) {
+    lines.push(`  Tool: ${toolHint.tool}`);
+    lines.push(`  THEN call: ${toolHint.hint} Use THEN window dates.`);
+    lines.push(`  NOW  call: ${toolHint.hint} Use NOW window dates.`);
+  } else {
+    lines.push('  Use the appropriate Mixpanel or Jira tool for this metric.');
+    lines.push('  Make TWO calls: one with THEN dates, one with NOW dates.');
+  }
+
+  lines.push(
+    '',
+    '📊 Presentation format:',
+    `  "Then (${when}): [value from THEN call] · Source: [tool](live)"`,
+    '  "Now: [value from NOW call] · Source: [tool](live)"',
+    '  "Change: [delta]% [drop/increase]"',
+    '',
+    '⚠️ DO NOT use any stored value from the prior interaction — qualitative notes only.',
+    '--- END THEN-VS-NOW ---'
+  );
+
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------

@@ -84,21 +84,19 @@ export const STATS_TOOLS = [
         },
         control: {
           type: 'object',
-          description: 'Required for ab_proportion.',
+          description: 'Required for ab_proportion. Must include n (total users) and conversions (converted users).',
           properties: {
             n:           { type: 'integer', description: 'Total users in control arm.' },
             conversions: { type: 'integer', description: 'Converted users in control arm.' },
           },
-          required: ['n', 'conversions'],
         },
         variant: {
           type: 'object',
-          description: 'Required for ab_proportion.',
+          description: 'Required for ab_proportion. Must include n (total users) and conversions (converted users).',
           properties: {
             n:           { type: 'integer', description: 'Total users in variant arm.' },
             conversions: { type: 'integer', description: 'Converted users in variant arm.' },
           },
-          required: ['n', 'conversions'],
         },
         mde: {
           type: 'number',
@@ -111,19 +109,18 @@ export const STATS_TOOLS = [
         },
         cohorts: {
           type: 'array',
-          description: 'Required for cohort_retention.',
+          description: 'Required for cohort_retention. Each item: { id: string, size: integer, retained_by_period: integer[] }.',
           items: {
             type: 'object',
             properties: {
-              id:   { type: 'string' },
-              size: { type: 'integer' },
+              id:   { type: 'string', description: 'Cohort identifier.' },
+              size: { type: 'integer', description: 'Total cohort size.' },
               retained_by_period: {
                 type: 'array',
                 items: { type: 'integer' },
-                description: 'Count still active per period (0 = first period).',
+                description: 'Count still active per period index (0 = first period).',
               },
             },
-            required: ['id', 'size', 'retained_by_period'],
           },
         },
         source: {

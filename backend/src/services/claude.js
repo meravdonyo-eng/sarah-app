@@ -1223,11 +1223,18 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   };
 
   if (tools.length > 0) {
-    requestOptions.tools = tools.map((t) => ({
+    const mappedTools = tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.input_schema,
     }));
+    // Cache tool definitions — they don't change within a session, so all calls after the first
+    // pay cache-read price ($0.30/M) instead of input price ($3/M)
+    mappedTools[mappedTools.length - 1] = {
+      ...mappedTools[mappedTools.length - 1],
+      cache_control: { type: 'ephemeral' },
+    };
+    requestOptions.tools = mappedTools;
   }
 
   // Retry + timeout wrapper
@@ -1328,7 +1335,12 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
       return { response: response.content.find(b => b.type === 'text')?.text || '', conversationHistory: messages, jiraAuthFailed: true };
     }
 
-    messages.push({ role: 'user', content: toolResults });
+    // Mark the last tool_result with cache_control so the growing prefix is cached for the next
+    // iteration — each loop call reads prior tool results at $0.30/M instead of $3/M
+    const toolResultsForMessages = toolResults.map((tr, i) =>
+      i === toolResults.length - 1 ? { ...tr, cache_control: { type: 'ephemeral' } } : tr
+    );
+    messages.push({ role: 'user', content: toolResultsForMessages });
     response = await createWithRetry({ ...requestOptions, messages });
   }
 

@@ -65,6 +65,23 @@ function writePrompt(content) {
 }
 
 // --- HTML shell ---
+function topbar(activePage = '') {
+  const links = [
+    { href: '/admin/prompt',   label: '📝 Prompt'   },
+    { href: '/admin/monitors', label: '🔔 Monitors'  },
+  ];
+  return `
+    <div class="topbar">
+      <h1>🤖 Sarah Admin</h1>
+      <nav>
+        ${links.map(l =>
+          `<a href="${l.href}"${activePage === l.href ? ' class="active"' : ''}>${l.label}</a>`
+        ).join('')}
+        <a href="/admin/logout">התנתק</a>
+      </nav>
+    </div>`;
+}
+
 function page(title, body) {
   return `<!DOCTYPE html>
 <html lang="he" dir="ltr">
@@ -80,10 +97,12 @@ function page(title, body) {
               padding: 14px 32px; display: flex; align-items: center; gap: 16px; }
     .topbar h1 { font-size: 18px; font-weight: 700; color: #38bdf8; }
     .topbar .sub { font-size: 13px; color: #64748b; }
-    .topbar a { margin-left: auto; font-size: 13px; color: #94a3b8;
+    .topbar nav { margin-left: auto; display: flex; gap: 8px; }
+    .topbar a { font-size: 13px; color: #94a3b8;
                 text-decoration: none; padding: 6px 12px; border: 1px solid #334155;
                 border-radius: 6px; }
     .topbar a:hover { background: #334155; color: #e2e8f0; }
+    .topbar a.active { background: #0ea5e9; color: #fff; border-color: #0ea5e9; }
     .container { max-width: 960px; margin: 40px auto; padding: 0 24px; }
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px;
             padding: 28px; margin-bottom: 24px; }
@@ -114,6 +133,18 @@ function page(title, body) {
     .meta { font-size: 12px; color: #475569; margin-top: 8px; }
     .footer { display: flex; align-items: center; justify-content: space-between;
               margin-top: 14px; }
+    /* Table */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 10px 12px; font-size: 11px; font-weight: 700;
+         text-transform: uppercase; letter-spacing: 0.05em; color: #64748b;
+         border-bottom: 1px solid #334155; }
+    td { padding: 12px; border-bottom: 1px solid #1e293b; color: #e2e8f0; vertical-align: middle; }
+    tr:hover td { background: #1e293b; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+    .badge-green  { background: #14532d; color: #86efac; }
+    .badge-yellow { background: #713f12; color: #fde68a; }
+    .badge-red    { background: #7f1d1d; color: #fca5a5; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
     /* Login */
     .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
     .login-card { background: #1e293b; border: 1px solid #334155; border-radius: 16px;
@@ -188,11 +219,7 @@ router.get('/prompt', requireAuth, (req, res) => {
   const escaped = current.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
   res.send(page('System Prompt', `
-    <div class="topbar">
-      <h1>🤖 Sarah Admin</h1>
-      <span class="sub">Global System Prompt</span>
-      <a href="/admin/logout">התנתק</a>
-    </div>
+    ${topbar('/admin/prompt')}
     <div class="container">
       ${saved}
       ${errorMsg}
@@ -273,6 +300,103 @@ router.post('/upload', requireAuth, upload.single('file'), async (req, res) => {
     console.error('Upload parse error:', err);
     res.redirect('/admin/prompt?error=parse');
   }
+});
+
+// GET /admin/monitors — all monitors across all workspaces
+router.get('/monitors', requireAuth, async (req, res) => {
+  const adminToken = process.env.ADMIN_TOKEN || '';
+  const saved   = req.query.saved   === '1' ? '<div class="alert alert-success">✅ נשמר.</div>' : '';
+  const deleted = req.query.deleted === '1' ? '<div class="alert alert-success">✅ נמחק.</div>' : '';
+
+  res.send(page('Monitors', `
+    ${topbar('/admin/monitors')}
+    <div class="container">
+      ${saved}${deleted}
+      <div class="card">
+        <h2>🔔 Proactive Monitors</h2>
+        <p>All monitors across all workspaces. Fires are counted over the last 7 days.<br>
+           Mute/Unmute and Delete act immediately via the admin API.</p>
+        <div id="monitors-table">⏳ Loading…</div>
+      </div>
+    </div>
+
+    <script>
+    const ADMIN_TOKEN = ${JSON.stringify(adminToken)};
+
+    async function apiFetch(path, opts = {}) {
+      const r = await fetch(path, {
+        headers: { 'x-admin-token': ADMIN_TOKEN, 'Content-Type': 'application/json', ...(opts.headers||{}) },
+        ...opts,
+      });
+      return r.json();
+    }
+
+    function badge(status, mutedUntil) {
+      const now = new Date();
+      const isMuted = status === 'muted' || (mutedUntil && new Date(mutedUntil) > now);
+      if (isMuted) return '<span class="badge badge-yellow">🔕 Muted</span>';
+      if (status === 'active') return '<span class="badge badge-green">✅ Active</span>';
+      return '<span class="badge badge-red">' + status + '</span>';
+    }
+
+    async function load() {
+      const monitors = await apiFetch('/api/admin/monitors');
+      const el = document.getElementById('monitors-table');
+      if (!Array.isArray(monitors) || monitors.length === 0) {
+        el.innerHTML = '<p style="color:#64748b;font-size:14px">No monitors configured.</p>';
+        return;
+      }
+
+      const rows = monitors.map(m => {
+        const thr = typeof m.threshold === 'string' ? JSON.parse(m.threshold) : m.threshold;
+        const pct = thr?.value ? Math.round(thr.value * 100) + '%' : '—';
+        const dir = thr?.direction || 'both';
+        const isMuted = m.status === 'muted' || (m.muted_until && new Date(m.muted_until) > new Date());
+        return \`<tr>
+          <td><strong>\${m.metric_label || m.monitor_id}</strong><br>
+              <span style="color:#64748b;font-size:11px">\${m.monitor_id}</span></td>
+          <td>\${m.team_name || m.workspace_id}</td>
+          <td>\${badge(m.status, m.muted_until)}</td>
+          <td>>\${pct} \${dir}</td>
+          <td>\${m.channel}</td>
+          <td>\${m.fires_7d || 0}</td>
+          <td style="white-space:nowrap">
+            \${isMuted
+              ? \`<button class="btn btn-primary btn-sm" onclick="setMute('\${m.workspace_id}','\${m.monitor_id}',0)">Unmute</button>\`
+              : \`<button class="btn btn-ghost btn-sm" onclick="setMute('\${m.workspace_id}','\${m.monitor_id}',24)">Mute 24h</button>\`
+            }
+            <button class="btn btn-danger btn-sm" style="margin-left:6px"
+                    onclick="del('\${m.workspace_id}','\${m.monitor_id}')">Delete</button>
+          </td>
+        </tr>\`;
+      }).join('');
+
+      el.innerHTML = \`<table>
+        <thead><tr>
+          <th>Monitor</th><th>Workspace</th><th>Status</th>
+          <th>Threshold</th><th>Channel</th><th>Fires 7d</th><th>Actions</th>
+        </tr></thead>
+        <tbody>\${rows}</tbody>
+      </table>\`;
+    }
+
+    async function setMute(wsId, monId, hours) {
+      await apiFetch(\`/api/admin/workspaces/\${wsId}/monitors/\${monId}/mute\`, {
+        method: 'POST',
+        body: JSON.stringify({ hours }),
+      });
+      load();
+    }
+
+    async function del(wsId, monId) {
+      if (!confirm(\`Delete monitor \${monId}? This cannot be undone.\`)) return;
+      await apiFetch(\`/api/admin/workspaces/\${wsId}/monitors/\${monId}\`, { method: 'DELETE' });
+      load();
+    }
+
+    load();
+    </script>
+  `));
 });
 
 export default router;

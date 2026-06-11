@@ -206,4 +206,50 @@ router.post('/workspaces/:id/monitors', async (req, res) => {
   }
 });
 
+// DELETE /api/admin/workspaces/:id/monitors/:monitorId — delete a monitor
+router.delete('/workspaces/:id/monitors/:monitorId', async (req, res) => {
+  try {
+    const { deleteMonitor } = await import('../services/monitoringDb.js');
+    await deleteMonitor(req.params.id, req.params.monitorId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/workspaces/:id/monitors/:monitorId/mute — mute/unmute a monitor
+router.post('/workspaces/:id/monitors/:monitorId/mute', async (req, res) => {
+  try {
+    const { muteMonitor, unmuteMonitor } = await import('../services/monitoringDb.js');
+    const { hours } = req.body;
+    if (hours === 0 || hours === '0') {
+      await unmuteMonitor(req.params.id, req.params.monitorId);
+    } else {
+      const until = new Date(Date.now() + (parseInt(hours) || 24) * 60 * 60 * 1000);
+      await muteMonitor(req.params.id, req.params.monitorId, until.toISOString());
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/monitors — all monitors across all workspaces
+router.get('/monitors', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT mc.*, w.team_name,
+             (SELECT COUNT(*) FROM monitor_fire_log f
+              WHERE f.workspace_id = mc.workspace_id AND f.monitor_id = mc.monitor_id
+                AND f.fired_at > NOW() - INTERVAL '7 days') AS fires_7d
+      FROM monitor_configs mc
+      LEFT JOIN workspaces w ON w.workspace_id = mc.workspace_id
+      ORDER BY mc.updated_at DESC
+    `);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

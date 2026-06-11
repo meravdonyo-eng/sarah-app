@@ -1233,9 +1233,21 @@ export async function handleAction({ action, ack, say, body, context, client }) 
       const { workspace_id: wsId, monitor_id: monId, hours = 24 } = JSON.parse(action.value || '{}');
       const until = new Date(Date.now() + hours * 60 * 60 * 1000);
       await muteMonitor(wsId, monId, until.toISOString());
-      await say({ text: `🔕 Monitor *${monId}* muted for ${hours}h (until ${until.toLocaleTimeString()}). Type *connect mixpanel* to re-enable.` });
+      await say({ text: `🔕 Monitor *${monId}* muted for ${hours}h. Type *unmute alerts* or use \`/sarah monitors\` to re-enable.` });
     } catch (err) {
       await say({ text: `Could not mute monitor: ${err.message}` });
+    }
+    return;
+  }
+
+  if (action.action_id === 'monitor_unmute') {
+    try {
+      const { unmuteMonitor } = await import('../services/monitoringDb.js');
+      const { workspace_id: wsId, monitor_id: monId } = JSON.parse(action.value || '{}');
+      await unmuteMonitor(wsId, monId);
+      await say({ text: `✅ Monitor *${monId}* re-enabled — alerts will resume as scheduled.` });
+    } catch (err) {
+      await say({ text: `Could not unmute monitor: ${err.message}` });
     }
     return;
   }
@@ -1633,11 +1645,79 @@ export async function handleSarahCommand({ command, ack, client, context }) {
     return;
   }
 
+  // --- /sarah monitors --- ephemeral list with mute/unmute controls
+  if (sub === 'monitors' || sub === 'alerts') {
+    const { getWorkspaceMonitors } = await import('../services/monitoringDb.js');
+    const monitors = await getWorkspaceMonitors(workspaceId);
+
+    if (monitors.length === 0) {
+      await client.chat.postEphemeral({
+        channel: command.channel_id, user: userId,
+        text: '📭 No monitors configured for this workspace. Contact your admin to set up proactive monitoring.',
+      });
+      return;
+    }
+
+    const now = new Date();
+    const blocks = [
+      { type: 'header', text: { type: 'plain_text', text: '🔍 Monitors' } },
+    ];
+
+    for (const m of monitors) {
+      const isMuted = m.status === 'muted' ||
+        (m.muted_until && new Date(m.muted_until) > now);
+      const thr = typeof m.threshold === 'string' ? JSON.parse(m.threshold) : m.threshold;
+      const pct  = thr?.value ? `${Math.round(thr.value * 100)}%` : '—';
+      const dir  = thr?.direction === 'drop' ? 'drop' : thr?.direction === 'rise' ? 'rise' : 'change';
+      const statusText = isMuted
+        ? (m.muted_until
+            ? `🔕 Muted until ${new Date(m.muted_until).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })} UTC`
+            : '🔕 Muted indefinitely')
+        : '✅ Active';
+
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*${m.metric_label || m.monitor_id}*\n` +
+                `Threshold: >${pct} ${dir} · Channel: <#${m.channel}> · ${statusText}`,
+        },
+        accessory: isMuted
+          ? {
+              type: 'button',
+              text: { type: 'plain_text', text: 'Unmute' },
+              action_id: 'monitor_unmute',
+              value: JSON.stringify({ workspace_id: workspaceId, monitor_id: m.monitor_id }),
+              style: 'primary',
+            }
+          : {
+              type: 'button',
+              text: { type: 'plain_text', text: 'Mute 24h' },
+              action_id: 'monitor_mute',
+              value: JSON.stringify({ workspace_id: workspaceId, monitor_id: m.monitor_id, hours: 24 }),
+            },
+      });
+    }
+
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn',
+        text: `${monitors.length} monitor${monitors.length !== 1 ? 's' : ''} · Type *unmute alerts* to re-enable all` }],
+    });
+
+    await client.chat.postEphemeral({
+      channel: command.channel_id, user: userId,
+      blocks,
+      text: `${monitors.length} monitor${monitors.length !== 1 ? 's' : ''} configured.`,
+    });
+    return;
+  }
+
   // Unknown sub-command → help
   await client.chat.postEphemeral({
     channel: command.channel_id,
     user: userId,
-    text: 'Available commands:\n• `/sarah settings` — open Sarah settings\n• `/sarah` — same as `/sarah settings`',
+    text: 'Available commands:\n• `/sarah settings` — open Sarah settings\n• `/sarah monitors` — view and manage alert monitors\n• `/sarah` — same as `/sarah settings`',
   });
 }
 

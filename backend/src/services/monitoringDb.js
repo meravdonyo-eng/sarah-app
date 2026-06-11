@@ -61,6 +61,14 @@ export async function upsertMonitor(config) {
   );
 }
 
+export async function getWorkspaceMonitors(workspaceId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM monitor_configs WHERE workspace_id = $1 ORDER BY created_at DESC`,
+    [workspaceId]
+  );
+  return rows;
+}
+
 export async function muteMonitor(workspaceId, monitorId, untilTimestamp = null) {
   await pool.query(
     `UPDATE monitor_configs
@@ -69,6 +77,22 @@ export async function muteMonitor(workspaceId, monitorId, untilTimestamp = null)
     [workspaceId, monitorId,
      untilTimestamp ? 'active' : 'muted',
      untilTimestamp || null]
+  );
+}
+
+export async function unmuteMonitor(workspaceId, monitorId) {
+  await pool.query(
+    `UPDATE monitor_configs
+     SET status = 'active', muted_until = NULL, updated_at = NOW()
+     WHERE workspace_id = $1 AND monitor_id = $2`,
+    [workspaceId, monitorId]
+  );
+}
+
+export async function deleteMonitor(workspaceId, monitorId) {
+  await pool.query(
+    `DELETE FROM monitor_configs WHERE workspace_id = $1 AND monitor_id = $2`,
+    [workspaceId, monitorId]
   );
 }
 

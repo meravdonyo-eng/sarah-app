@@ -1222,19 +1222,23 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     output_config: { effort: 'high' },
   };
 
-  if (tools.length > 0) {
+  {
     const mappedTools = tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.input_schema,
     }));
-    // Cache tool definitions — they don't change within a session, so all calls after the first
-    // pay cache-read price ($0.30/M) instead of input price ($3/M)
-    mappedTools[mappedTools.length - 1] = {
-      ...mappedTools[mappedTools.length - 1],
-      cache_control: { type: 'ephemeral' },
-    };
-    requestOptions.tools = mappedTools;
+    if (mappedTools.length > 0) {
+      // Cache tool definitions — they don't change within a session, so all calls after the first
+      // pay cache-read price ($0.30/M) instead of input price ($3/M)
+      mappedTools[mappedTools.length - 1] = {
+        ...mappedTools[mappedTools.length - 1],
+        cache_control: { type: 'ephemeral' },
+      };
+    }
+    // web_search is Anthropic-hosted (server-side) — Anthropic executes it, no client-side handler
+    // needed. Always on: used for G8.5 industry benchmarks, seasonal trends, competitive comparisons.
+    requestOptions.tools = [...mappedTools, { type: 'web_search_20260209', name: 'web_search' }];
   }
 
   // Retry + timeout wrapper
@@ -1262,11 +1266,20 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
   let iterations = 0;
   const maxIterations = 10;
 
-  while (response.stop_reason === 'tool_use' && iterations < maxIterations) {
+  while ((response.stop_reason === 'tool_use' || response.stop_reason === 'pause_turn') && iterations < maxIterations) {
     if (iterations > 0) {
       console.log(`[ToolLoop] iteration=${iterations} stop_reason=${response.stop_reason} tools=${response.content.filter(b => b.type === 'tool_use').map(b => b.name).join(', ')}`);
     }
     if (signal?.aborted) throw new Error('AbortError');
+
+    // pause_turn: Anthropic's server-side web_search loop hit its 10-iteration limit.
+    // Re-send the conversation so the server resumes — no tool_result needed.
+    if (response.stop_reason === 'pause_turn') {
+      iterations++;
+      messages.push({ role: 'assistant', content: response.content });
+      response = await createWithRetry({ ...requestOptions, messages });
+      continue;
+    }
 
     iterations++;
     const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
@@ -1346,7 +1359,7 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
 
   // If loop exited because maxIterations was reached (not because Claude stopped calling tools),
   // log it clearly and substitute a helpful message instead of Sarah's partial "Let me check..." text.
-  if (response.stop_reason === 'tool_use' && iterations >= maxIterations) {
+  if ((response.stop_reason === 'tool_use' || response.stop_reason === 'pause_turn') && iterations >= maxIterations) {
     console.warn(`[ToolLoop] maxIterations (${maxIterations}) reached — substituting graceful error`);
     return {
       response: 'I ran too many data queries without completing this analysis. This usually means the question is too broad or there\'s a data connectivity issue. Could you break it into a smaller question?',

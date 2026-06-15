@@ -1377,6 +1377,19 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
       return { response: response.content.find(b => b.type === 'text')?.text || '', conversationHistory: messages, jiraAuthFailed: true };
     }
 
+    // Anthropic allows a maximum of 4 cache_control blocks per request.
+    // Strip cache_control from any previous tool_result batches in messages before
+    // adding the new one — only the latest batch needs to be cached.
+    for (const msg of messages) {
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+      if (!msg.content.some(c => c.type === 'tool_result' && c.cache_control)) continue;
+      msg.content = msg.content.map(c => {
+        if (c.type !== 'tool_result' || !c.cache_control) return c;
+        const { cache_control: _, ...rest } = c;
+        return rest;
+      });
+    }
+
     // Mark the last tool_result with cache_control so the growing prefix is cached for the next
     // iteration — each loop call reads prior tool results at $0.30/M instead of $3/M
     const toolResultsForMessages = toolResults.map((tr, i) =>

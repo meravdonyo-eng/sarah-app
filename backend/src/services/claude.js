@@ -1238,7 +1238,9 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }
     // web_search is Anthropic-hosted (server-side) — Anthropic executes it, no client-side handler
     // needed. Always on: used for G8.5 industry benchmarks, seasonal trends, competitive comparisons.
-    requestOptions.tools = [...mappedTools, { type: 'web_search_20260209', name: 'web_search' }];
+    // Using 20250305 (not 20260209) — the newer version requires code_execution tool for dynamic
+    // filtering, which we don't include and would cause a 400.
+    requestOptions.tools = [...mappedTools, { type: 'web_search_20250305', name: 'web_search' }];
   }
 
   // Retry + timeout wrapper

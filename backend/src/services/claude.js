@@ -403,9 +403,13 @@ function sanitizeHistory(history) {
       ...msg,
       content: msg.content.map(c => {
         if (c.type !== 'tool_result') return c;
-        const text = typeof c.content === 'string' ? c.content : JSON.stringify(c.content ?? '');
-        if (text.length <= TOOL_RESULT_MAX) return c;
-        return { ...c, content: text.slice(0, TOOL_RESULT_MAX) + '…[truncated]' };
+        // Strip cache_control from historical tool_results — Anthropic allows only 4
+        // cache_control blocks total. History entries from prior turns consume that budget
+        // unnecessarily; only the CURRENT turn's blocks should be cached.
+        const { cache_control: _cc, ...block } = c;
+        const text = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
+        if (text.length <= TOOL_RESULT_MAX) return block;
+        return { ...block, content: text.slice(0, TOOL_RESULT_MAX) + '…[truncated]' };
       }),
     };
   });

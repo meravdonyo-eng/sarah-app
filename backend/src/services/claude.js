@@ -1255,8 +1255,12 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
         ]);
       } catch (err) {
         if (err.message === 'TIMEOUT' || err.name === 'AbortError') throw err;
-        // 429 rate-limit: retrying immediately is futile (resets in ~60s), throw right away
+        // 4xx client errors: retrying is futile, throw immediately
         if (err.status === 429) throw err;
+        if (err.status === 400) {
+          console.error(`[ClaudeAPI] 400 Bad Request — message: ${err.message} | error body: ${JSON.stringify(err.error ?? err.body ?? null)}`);
+          throw err;
+        }
         if (attempt === retries) throw err;
         console.warn(`[ClaudeRetry] attempt ${attempt} failed: ${err.message} — retrying...`);
         await new Promise(r => setTimeout(r, 1000 * attempt));

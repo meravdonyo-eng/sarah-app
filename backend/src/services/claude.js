@@ -1264,7 +1264,26 @@ export async function sendMessageWithTools(workspace, userMessage, conversationH
     }
   }
 
-  let response = await createWithRetry(requestOptions);
+  // First call — if 400 and web_search is in the tools, strip it and retry.
+  // The Anthropic API returns 400 when web search isn't enabled for the org
+  // (Console → Settings → Privacy). Falling back keeps all other tools working.
+  let response;
+  try {
+    response = await createWithRetry(requestOptions);
+  } catch (err) {
+    const hasWebSearch = requestOptions.tools?.some(t => t.name === 'web_search');
+    if (err.status === 400 && hasWebSearch) {
+      console.warn('[WebSearch] 400 on first call — web search likely not enabled for this org. Retrying without it. Full error:', err.message);
+      const toolsWithoutSearch = requestOptions.tools.filter(t => t.name !== 'web_search');
+      const fallbackOptions = {
+        ...requestOptions,
+        tools: toolsWithoutSearch.length > 0 ? toolsWithoutSearch : undefined,
+      };
+      response = await createWithRetry(fallbackOptions);
+    } else {
+      throw err;
+    }
+  }
   let iterations = 0;
   const maxIterations = 10;
 
